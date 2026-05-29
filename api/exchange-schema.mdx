@@ -1,7 +1,7 @@
 ---
 title: "Exchange Schema API: Candles, Orders, and Formatting"
 sidebarTitle: "Exchange Schema"
-description: "How to implement and register addExchangeSchema with getCandles, getOrderBook, getAggregatedTrades, formatPrice, and formatQuantity using ccxt or a custom adapter."
+description: "Register addExchangeSchema with getCandles, getOrderBook, getAggregatedTrades, formatPrice, and formatQuantity using ccxt.binance or a custom data adapter."
 ---
 
 The exchange schema is the bridge between `backtest-kit`'s internal engine and the actual market data source. It is registered once at startup via `addExchangeSchema` and then resolved by name whenever `Backtest.background` or `Live.background` needs to fetch candles, format prices, or retrieve order book depth. The reference implementation in `content/apr_2026.strategy/modules/backtest.module.ts` uses `ccxt.binance` in spot mode with rate limiting enabled, but any data source that satisfies the interface will work.

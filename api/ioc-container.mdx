@@ -1,7 +1,7 @@
 ---
 title: "IoC Container & Dependency Injection in @pro/core"
 sidebarTitle: "IoC Container"
-description: "Understand the symbol-keyed IoC container powering @pro/core: how services are registered with provide(), resolved with inject(), and surfaced as core.xService globals."
+description: "How @pro/core's IoC container registers services via provide(), resolves them with inject(), and surfaces all singletons through the core global."
 ---
 
 The `@pro/core` package ships a lightweight IoC container built on top of `di-kit`. When the package is imported, it automatically registers all core services as lazy singletons, wires them together, and exposes the fully-resolved `ioc` object on `globalThis.core` — meaning any strategy file can write `core.candleDbService` without a single import statement.
@@ -90,9 +90,7 @@ const coreServices = {
 };
 
 const screenServices = {
-  cryptoYodaScreenService: inject<CryptoYodaScreenService>(
-    TYPES.cryptoYodaScreenService
-  ),
+  cryptoYodaScreenService: inject<CryptoYodaScreenService>(TYPES.cryptoYodaScreenService),
 };
 
 export const ioc = {

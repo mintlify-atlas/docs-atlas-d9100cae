@@ -1,7 +1,7 @@
 ---
-title: "BaseMap: Namespaced Redis Key-Value Map with TTL in @pro/core"
+title: "BaseMap: Namespaced Redis Key-Value Map with TTL (@pro/core)"
 sidebarTitle: "Base Map"
-description: "Explore BaseMap, a di-factory Redis wrapper that provides namespaced key-value storage, optional TTL expiry, streaming iteration, and async SCAN-based bulk operations."
+description: "Explore BaseMap, a di-factory Redis wrapper with namespaced keys, optional TTL expiry, streaming async iteration, and SCAN-based bulk operations."
 ---
 
 `BaseMap` is a `di-factory` factory function that wraps an `ioredis` client to produce a strongly-typed, namespace-isolated key-value map. Every key is automatically prefixed with `connectionKey:` so that multiple `BaseMap` instances sharing the same Redis database never collide. An optional TTL gives entries automatic expiry — pass `-1` to keep entries indefinitely. `LoggerService` is injected automatically for structured logging of every operation.

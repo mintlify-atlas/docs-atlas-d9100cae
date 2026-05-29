@@ -1,7 +1,7 @@
 ---
-title: "Run All 9 Symbols in Parallel With Mode A"
+title: "Parallel Backtest for All 9 Symbols via Mode A Entry"
 sidebarTitle: "Mode A: Parallel"
-description: "Learn how the --entry flag activates the parallel runner in backtest.ts, pre-warms candles via --cache, and drives 9 symbol backtests concurrently in a single Node process."
+description: "How --entry activates backtest.ts parallel runner, pre-warms candles via --cache, and runs 9 symbols concurrently in one Node process."
 ---
 
 Mode A is the high-throughput path for backtesting. When you pass the `--entry` flag, `packages/main/src/main/backtest.ts` becomes the orchestrator: it reads every symbol from `CC_SYMBOL_LIST`, optionally pre-warms their candles into MongoDB, and then fires a concurrent `Backtest.background(symbol, ...)` call for each one — all inside a **single Node process** sharing one event loop, one Mongo connection pool, and one Redis pool. No subprocesses, no IPC, no fork overhead.
@@ -67,10 +67,10 @@ npm run start -- --backtest --entry --ui --cache ./content/apr_2026.strategy/apr
     The `listenActivePing` handler in `apr_2026.strategy.ts` logs a line on every tick:
 
     ```
-    active <SYMBOL> backtest=<historicalMs> now=<wallClockMs>
+    active <SYMBOL> <timestamp>
     ```
 
-    `backtest` is the historical timestamp being replayed; `now` is the wall-clock time of the Node process. Watching both columns lets you gauge replay speed in real time.
+    `<SYMBOL>` is the pair being replayed and `<timestamp>` is the historical epoch millisecond being processed. Watching the timestamp advance lets you gauge replay speed in real time.
   </Step>
 </Steps>
 

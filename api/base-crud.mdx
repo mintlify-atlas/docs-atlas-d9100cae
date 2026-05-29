@@ -1,7 +1,7 @@
 ---
 title: "BaseCRUD: Mongoose CRUD & Pagination Factory in @pro/core"
 sidebarTitle: "Base CRUD"
-description: "Learn how BaseCRUD wraps a Mongoose Model to provide create, update, find, iterate, and paginate methods — and how CandleDbService extends it with atomic upserts."
+description: "How BaseCRUD wraps a Mongoose Model to provide create, update, find, iterate, and paginate — and how CandleDbService extends it with atomic upserts."
 ---
 
 `BaseCRUD` is a `di-factory` factory function that accepts a Mongoose `Model<any>` and returns a class pre-loaded with a full set of CRUD operations, cursor-based iteration, and skip/limit pagination. Extending `BaseCRUD(YourModel)` is the standard pattern for building database services inside `@pro/core`; the factory wires in `LoggerService` automatically so every operation emits structured log lines without additional setup.

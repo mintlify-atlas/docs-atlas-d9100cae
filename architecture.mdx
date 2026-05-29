@@ -75,6 +75,12 @@ export default TYPES;
 
 ```typescript
 // packages/core/src/lib/core/provide.ts
+import LoggerService from "../services/base/LoggerService";
+import CandleDbService from "../services/db/CandleDbService";
+import ParserService from "../services/core/ParserService";
+import ScraperService from "../services/core/ScraperService";
+import CryptoYodaScreenService from "../services/screen/CryptoYodaScreenService";
+
 import { provide } from "./di";
 import TYPES from "./types";
 
@@ -98,7 +104,7 @@ import TYPES from "./types";
 
 ### `ioc` assembly and `globalThis` assignment
 
-`packages/core/src/lib/index.ts` imports `provide.ts` (as a side-effect), calls `inject<T>()` for each service, composes the `ioc` object, calls `init()` to resolve the container, then assigns `ioc` to `globalThis.core`:
+`packages/core/src/lib/index.ts` imports `provide.ts` (as a side-effect), calls `inject<T>()` for each service into per-category objects, spreads those objects into the `ioc` export, calls `init()` to resolve the container, then assigns `ioc` to `globalThis.core`:
 
 ```typescript
 // packages/core/src/lib/index.ts
@@ -106,12 +112,34 @@ import "./core/provide";
 import { inject, init } from "./core/di";
 import TYPES from "./core/types";
 
-export const ioc = {
+import LoggerService from "./services/base/LoggerService";
+import ScraperService from "./services/core/ScraperService";
+import ParserService from "./services/core/ParserService";
+import CryptoYodaScreenService from "./services/screen/CryptoYodaScreenService";
+import CandleDbService from "./services/db/CandleDbService";
+
+const baseServices = {
   loggerService: inject<LoggerService>(TYPES.loggerService),
+};
+
+const dbServices = {
   candleDbService: inject<CandleDbService>(TYPES.candleDbService),
+};
+
+const coreServices = {
   scraperService: inject<ScraperService>(TYPES.scraperService),
   parserService: inject<ParserService>(TYPES.parserService),
+};
+
+const screenServices = {
   cryptoYodaScreenService: inject<CryptoYodaScreenService>(TYPES.cryptoYodaScreenService),
+};
+
+export const ioc = {
+  ...baseServices,
+  ...coreServices,
+  ...dbServices,
+  ...screenServices,
 };
 
 init();
@@ -121,9 +149,11 @@ declare global {
 }
 
 Object.assign(globalThis, { core: ioc });
+
+export default ioc;
 ```
 
-`packages/core/src/index.ts` is a single re-export: `export { ioc } from "./lib";`. The rollup build bundles this into `packages/core/build/index.cjs` and emits the global augmentation into `packages/core/types.d.ts`.
+`packages/core/src/index.ts` re-exports the assembled object: `export { ioc } from "./lib";`. The rollup build bundles this into `packages/core/build/index.cjs` and emits the global augmentation into `packages/core/types.d.ts`.
 
 ## `@pro/main`: entry point dispatcher
 
@@ -162,7 +192,7 @@ The `config/` directory contains three files that run before any strategy code:
 </Accordion>
 
 <Accordion title="loader.config.ts — initialization sequence">
-  Waits for the Mongo connection to resolve, then imports `@pro/core` (triggering the `globalThis.core` assignment) and `@pro/main` (registering the mode dispatchers):
+  Imports `@pro/core` (triggering the `globalThis.core` assignment) and `@pro/main` (registering the mode dispatchers), then waits for the Mongo connection to resolve:
 
   ```typescript
   // config/loader.config.ts
@@ -200,7 +230,7 @@ The `config/` directory contains three files that run before any strategy code:
 
 Each package builds independently with rollup and emits two artifacts:
 
-```
+```text
 packages/
   core/
     build/index.cjs     ← runtime bundle (required by alias.config.ts)
@@ -226,7 +256,7 @@ done
 cd ..
 ```
 
-`npm run build` at the root delegates to this script (or `scripts/win/build.bat` on Windows via `npm run build:win`). Both call `rollup -c` inside each package — `@rollup/plugin-typescript` compiles the source; `rollup-plugin-dts` bundles the declarations into the single `types.d.ts` file.
+`npm run build` at the root delegates to this script via `npm run build:x` (or `scripts/win/build.bat` on Windows via `npm run build:win`). Both call `rollup -c` inside each package — `@rollup/plugin-typescript` compiles the source; `rollup-plugin-dts` bundles the declarations into the single `types.d.ts` file.
 
 ## Zero-import DI via `tsconfig.json` paths
 
@@ -266,7 +296,7 @@ The monorepo is designed to grow without restructuring. Adding a new service fol
     Add `provide(TYPES.xService, () => new XService())` to `packages/core/src/lib/core/provide.ts`.
   </Step>
   <Step title="Expose on ioc">
-    Add `xService: inject<XService>(TYPES.xService)` to the `ioc` object in `packages/core/src/lib/index.ts`.
+    Add `xService: inject<XService>(TYPES.xService)` to a per-category object in `packages/core/src/lib/index.ts`, then spread it into `ioc`.
   </Step>
   <Step title="Rebuild">
     Run `npm run build`. The regenerated `types.d.ts` immediately makes `core.xService` available as a globally typed, runtime-callable property in every file under `./content/` — no changes to strategy files required.

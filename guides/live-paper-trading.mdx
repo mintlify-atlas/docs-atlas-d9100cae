@@ -1,7 +1,7 @@
 ---
-title: "Deploy Strategies to Live and Paper Trading Modes"
+title: "Deploy Your Strategies to Live and Paper Trading Modes"
 sidebarTitle: "Live & Paper"
-description: "Configure the --live and --paper entry flags to run strategies against real or simulated exchange data, and authenticate the Telegram scraper with the --session QR flow."
+description: "Use --live and --paper flags to deploy strategies against real or simulated exchange data, and authenticate Telegram with the --session QR flow."
 ---
 
 Once a strategy is validated in backtest, the same strategy file can be promoted to paper trading for real-time simulation or to live trading for actual exchange execution — without changing a single line of strategy logic. Both modes share the same `--entry` gate pattern as Mode A and iterate the same `CC_SYMBOL_LIST`, but they swap in Mongo-backed persistence adapters and connect to live exchange feeds instead of replaying cached candles.

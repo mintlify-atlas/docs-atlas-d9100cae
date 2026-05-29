@@ -1,7 +1,7 @@
 ---
-title: "Entry Point Modules in @pro/main Explained"
+title: "Entry Point Modules: backtest, live, paper, session"
 sidebarTitle: "Entry Points"
-description: "How backtest.ts, live.ts, paper.ts, and session.ts gate on CLI flags, load registered schemas, and dispatch parallel background runners or Telegram auth."
+description: "How backtest.ts, live.ts, paper.ts, and session.ts gate on CLI flags, load schemas, and dispatch parallel background runners or Telegram auth."
 ---
 
 The `packages/main/src/index.ts` file re-exports all four entry-point modules in a fixed order — `session`, `backtest`, `live`, `paper` — so they are all evaluated on every startup. Each module wraps its logic in a local `main()` async function and guards execution with early-return checks against the parsed CLI flags. Only the module whose flags match proceeds past the guard; the others return immediately without side effects.

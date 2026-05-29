@@ -1,7 +1,7 @@
 ---
-title: "Persistence Configuration: Adapters for Live and Backtest Modes"
+title: "Configure Persistence Adapters for Live and Backtest Modes"
 sidebarTitle: "Persistence Config"
-description: "Understand how config/setup.config.ts wires each backtest-kit subsystem to a Mongo, memory, or local-file adapter, and how to swap any one in a single line."
+description: "Understand how setup.config.ts wires each backtest-kit subsystem to a Mongo, memory, or local-file adapter, and how to swap any one in a single line."
 ---
 
 The file `config/setup.config.ts` is the single place in the monorepo that decides which storage adapter each `backtest-kit` subsystem uses. Live modes write to Mongo for durability; backtest replay modes use in-memory or local-file adapters so they never block on disk I/O during the hot loop. Switching any subsystem to a different adapter — including a custom one — is a one-line change in this file.
@@ -85,6 +85,7 @@ Each subsystem has two sides: **Live** (used during `--live` and `--paper` runs)
 
 | Subsystem | Live adapter | Backtest adapter |
 |---|---|---|
+| Dump | `Dump.useMarkdown()` — Markdown serialiser | same Markdown serialiser |
 | Session | `SessionLive.usePersist()` — Mongo | `SessionBacktest.useLocal()` — local file |
 | Storage | `StorageLive.usePersist()` — Mongo | `StorageBacktest.useMemory()` — in-process RAM |
 | Recent | `RecentLive.usePersist()` — Mongo | `RecentBacktest.useMemory()` — in-process RAM |

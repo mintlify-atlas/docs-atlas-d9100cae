@@ -1,7 +1,7 @@
 ---
-title: "Test One Symbol at a Time With Mode B"
+title: "Single-Symbol Backtesting With the Mode B CLI Runner"
 sidebarTitle: "Mode B: Single"
-description: "Understand how omitting --entry hands control to @backtest-kit/cli for a single-symbol backtest, making Mode B ideal for strategy development and focused debugging."
+description: "How omitting --entry hands control to @backtest-kit/cli for single-symbol backtests—ideal for strategy development and focused debugging."
 ---
 
 Mode B is the focused development path. When you run a backtest **without** the `--entry` flag, `packages/main/src/main/backtest.ts` detects the missing flag and early-returns immediately. Control passes entirely to `@backtest-kit/cli`, which loads the strategy file you provide as a path argument, calls the `addStrategySchema`, `addExchangeSchema`, and `addFrameSchema` functions registered inside it, and runs a single-symbol backtest based on whatever the strategy file dispatches. There is no parallel runner, no `CC_SYMBOL_LIST` iteration, and no cross-symbol coordination — just one strategy against one symbol at a time.

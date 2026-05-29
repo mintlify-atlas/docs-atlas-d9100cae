@@ -1,7 +1,7 @@
 ---
-title: "CLI Flags Reference for @pro/main Entry Points"
+title: "CLI Flags and Env Variables Reference for @pro/main"
 sidebarTitle: "CLI Flags"
-description: "Every boolean flag parsed by getArgs(), the positional strategy-file argument, and the environment variables that control parallel-mode symbol lists and Telegram auth."
+description: "Six boolean flags parsed by getArgs(), the positional strategy-file argument, and the environment variables that control symbol lists and Telegram auth."
 ---
 
 The `@pro/main` package reads all runtime configuration from a single call to `getArgs()`, which wraps Node's built-in `parseArgs` utility with `strict: false` and `allowPositionals: true`. Every flag is a plain boolean that defaults to `false`; flags are not mutually exclusive and are routinely combined in a single command. The positional argument — a path to a `.strategy.ts` file — tells the CLI loader which strategy module to execute before the entry-point gates are evaluated.
@@ -36,19 +36,18 @@ These flags gate execution inside `packages/main/src/main/backtest.ts`, `live.ts
   `--entry` is **required** for Mode A (parallel, multi-symbol) and has **no effect** in Mode B. In Mode B, the `@backtest-kit/cli` package reads the strategy file directly and drives a single-symbol backtest without consulting `packages/main/src/main/backtest.ts` at all.
 </Note>
 
-## Cache and UI flags
+## Cache flag
 
 <ParamField path="--cache" type="boolean" default="false">
   Pre-warms candles for every symbol in `CC_SYMBOL_LIST` into MongoDB before starting the parallel runners. Calls `cacheCandles({ exchangeName, from, to, interval: '1m', symbol })` for each symbol using the registered frame's `startDate` / `endDate`. Ignored when `--entry` is not set.
 </ParamField>
 
-<ParamField path="--ui" type="boolean" default="false">
-  Starts the `@backtest-kit/ui` web interface on port **60050**. Passed through to `@backtest-kit/cli`; the dashboard shows live equity curves, open positions, and log streams for all running symbols.
-</ParamField>
+## Pass-through flags
 
-<ParamField path="--noCache" type="boolean" default="false">
-  Explicitly disables candle caching even when the environment would otherwise attempt it. Passed through to `@backtest-kit/cli`. Useful in Mode B when you want to force a fresh fetch from the exchange on every run.
-</ParamField>
+The following flags are **not** parsed by `getArgs()` in `packages/main`. Because `parseArgs` is called with `strict: false` and `allowPositionals: true`, any unrecognised flags are silently ignored by `@pro/main` and forwarded to `@backtest-kit/cli`, which handles them directly.
+
+- **`--ui`** — Starts the `@backtest-kit/ui` web interface on port **60050**. The dashboard shows live equity curves, open positions, and log streams for all running symbols.
+- **`--noCache`** — Explicitly disables candle caching. Useful in Mode B when you want to force a fresh fetch from the exchange on every run.
 
 ## Positional argument
 

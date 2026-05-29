@@ -1,7 +1,7 @@
 ---
 title: "Strategy Schema API: Signals, Laddering, and Events"
 sidebarTitle: "Strategy Schema"
-description: "How to register a strategy with addStrategySchema, implement getSignal with ladder-averaging logic, and react to active pings and errors via event listeners."
+description: "Register a strategy with addStrategySchema, implement getSignal with ladder-averaging logic, and react to active-ping and error lifecycle events."
 ---
 
 A strategy in `backtest-kit` is a named unit of trading logic registered at startup time through `addStrategySchema`. Once registered, the engine resolves it by name when `Backtest.background` or `Live.background` is called, invoking `getSignal` for every new position entry and routing lifecycle events to any attached listeners. Strategy files live under `./content/` and are loaded by the CLI at runtime — they are never bundled into `@pro/*` packages, so they can be edited and swapped without rebuilding the monorepo.
@@ -48,7 +48,7 @@ addStrategySchema({
       Spread of stop-loss and take-profit levels computed by `Position.moonbag({ position, currentPrice, percentStopLoss })`. Injects `stopLoss`, `takeProfit`, and related fields into the signal.
     </ResponseField>
     <ResponseField name="minuteEstimatedTime" type="number" required>
-      Estimated hold time in minutes. Use `Infinity` in the test file to let the ladder logic drive the close, or a fixed number to impose a time-based exit.
+      Estimated hold time in minutes. In the `apr_2026` strategy this is `50`. Use a fixed number to impose a time-based exit, or a large value when the ladder logic should drive the close instead.
     </ResponseField>
     <ResponseField name="cost" type="number" required>
       Initial position size in USDT for this entry step. In the `apr_2026` strategy, `LADDER_STEP_COST = 100`.

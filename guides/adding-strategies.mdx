@@ -1,7 +1,7 @@
 ---
 title: "Add a New Trading Strategy Without Monorepo Changes"
 sidebarTitle: "Adding Strategies"
-description: "Drop a strategy directory under ./content/, wire its exchange and frame schemas, and let the CLI load it by path — no monorepo rebuild or DI changes needed."
+description: "Drop a strategy directory under ./content/, wire its exchange and frame schemas, and let the CLI load it by path — no rebuild or DI changes needed."
 ---
 
 Strategies are deliberately isolated from the monorepo's compiled packages. The `@backtest-kit/cli` runner loads a strategy file by path at startup, evaluates it, and discovers the schemas registered inside it — no bundling, no imports into `@pro/*`, and no DI wiring required on the monorepo side. Adding a new strategy is purely additive: create a directory, write two files, and pass the path to the CLI.

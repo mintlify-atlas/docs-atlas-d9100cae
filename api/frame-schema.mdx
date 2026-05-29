@@ -1,7 +1,7 @@
 ---
 title: "Frame Schema API: Backtest Time Windows and Intervals"
 sidebarTitle: "Frame Schema"
-description: "Configure backtest time windows with addFrameSchema, choose candle intervals, understand startDate and endDate alignment with cacheCandles, and replay performance numbers."
+description: "Define backtest windows with addFrameSchema: set the candle interval, startDate, and endDate used by Backtest.background and the cacheCandles step."
 ---
 
 A frame schema defines the temporal boundaries of a backtest — the start date, end date, and candle interval that the engine uses when replaying historical market data. It is registered via `addFrameSchema` alongside the exchange and strategy schemas, and is resolved by name when `Backtest.background` dispatches a parallel runner. Without a registered frame, `backtest.ts` throws `"Frame not specified"` before any runners are launched.

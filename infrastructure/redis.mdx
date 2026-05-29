@@ -1,7 +1,7 @@
 ---
-title: "Redis Caching Layer for Fast O(1) Context Lookups"
+title: "Redis Caching Layer for O(1) Context Lookups in Backtest"
 sidebarTitle: "Redis"
-description: "Understand how Redis powers the BaseMap O(1) lookup cache, key namespacing with TTL controls, SCAN-based iteration, and how to start the bundled Docker service."
+description: "How Redis powers the BaseMap O(1) lookup cache, covering key namespacing, TTL controls, SCAN-based iteration, and starting the bundled Docker service."
 ---
 
 Redis acts as the hot-path lookup cache in `backtest-monorepo-parallel`, sitting in front of MongoDB on every `findByContext` call. Before any query reaches Mongo, `BaseMap` issues a Redis `GET` on `localhost` — a single round-trip that typically resolves in under a millisecond. This O(1) read characteristic is a primary reason the parallel runner sustains ~103 events/second and ~6,300× aggregate real-time replay speed across nine symbols in a single Node process.

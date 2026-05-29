@@ -1,7 +1,7 @@
 ---
-title: "Core Services Reference: Logger, Scraper, Parser & Candle DB"
+title: "@pro/core Services: Logger, Scraper, Parser & Candle DB"
 sidebarTitle: "Core Services"
-description: "Full API reference for the four services registered in @pro/core: LoggerService, ScraperService, ParserService, CandleDbService, and CryptoYodaScreenService."
+description: "Full API reference for the five @pro/core services: LoggerService, ScraperService, ParserService, CandleDbService, and CryptoYodaScreenService."
 ---
 
 `@pro/core` registers five services in its IoC container. Each is a lazy singleton resolved via `inject<T>(TYPES.token)` and accessible as a property on the `core` global in any strategy file. This page covers the public API of every service, their configuration requirements, and real usage examples drawn directly from the source.
@@ -144,7 +144,7 @@ Iterates Telegram messages for `channel` within the UTC day boundaries of `date`
 Internally, the method:
 1. Sets `dayStart` = `date` with UTC hours reset to `00:00:00.000`
 2. Sets `dayEnd` = `date` with UTC hours set to `23:59:59.999`
-3. Calls `client.iterMessages(channel, { offsetDate: Math.floor(dayEnd / 1000) + 1 })`
+3. Calls `client.iterMessages(channel, { offsetDate: Math.floor(dayEnd.getTime() / 1000) + 1, reverse: false })`
 4. Skips messages without a text body (`message.message` falsy)
 5. Breaks iteration once a message timestamp falls before `dayStart`
 
@@ -221,6 +221,24 @@ Extends `ScraperMessage` with a nullable `data` field:
 export interface ParserMessageRaw<M extends FieldMapping> extends ScraperMessage {
   data: ExtractedData<M> | null; // null when any required pattern fails
 }
+```
+
+#### `ParserMessageSuccess<M>`
+
+A narrowed variant of `ParserMessageRaw<M>` where `data` is guaranteed non-null. Use this type after filtering out messages with `data === null`:
+
+```typescript
+export interface ParserMessageSuccess<M extends FieldMapping> extends ScraperMessage {
+  data: ExtractedData<M>; // always present — non-null
+}
+```
+
+This is useful when you filter results to only successfully-parsed messages, e.g.:
+
+```typescript
+const successes = results.filter(
+  (r): r is ParserMessageSuccess<typeof SIGNAL_FORMAT> => r.data !== null
+);
 ```
 
 ### Methods

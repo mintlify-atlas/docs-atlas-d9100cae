@@ -1,7 +1,7 @@
 ---
-title: "backtest-monorepo-parallel: Fast Parallel Backtesting in TypeScript"
+title: "backtest-monorepo-parallel: Parallel Backtesting Framework"
 sidebarTitle: "Introduction"
-description: "A TypeScript monorepo template that runs 9 symbols concurrently in a single Node process, hitting ~6 300× real-time speed with Redis caching and atomic Mongo upserts."
+description: "TypeScript monorepo: 9 symbols in one Node process at ~6 300× real-time speed via Redis caching, atomic Mongo upserts, and a zero-import DI runtime."
 ---
 
 `backtest-monorepo-parallel` is a TypeScript monorepo template built on top of [backtest-kit](https://github.com/tripolskypetr/backtest-kit) that runs multiple trading symbols in parallel within a single Node.js process. It ships a zero-config dependency-injection runtime that exposes a typed `globalThis.core` object to strategy files under `./content/` — no imports, no bundler hooks, and no changes to the strategy author's code required.
@@ -92,14 +92,16 @@ TypeScript resolves `core.*` through the global augmentation (`declare global { 
 | Package | Version | Role |
 |---|---|---|
 | `backtest-kit` | 9.8.4 | Core engine; `@backtest-kit/cli` is the runner |
+| `@backtest-kit/cli` | 9.8.4 | CLI runner that evaluates strategy files |
 | `@backtest-kit/mongo` | 0.6.0 | Mongo persist adapters + `waitForInit()` |
 | `@backtest-kit/ui` | 9.8.4 | Optional web UI on port 60050 |
-| `di-kit` | latest | Symbol-keyed IoC container (`createActivator`) |
+| `@backtest-kit/graph` | 9.8.4 | Chart/graph rendering utilities |
 | `di-factory` | 1.0.9 | Class-factory helper for `BaseCRUD` / `BaseMap` |
 | `mongoose` | 8.23.0 | Mongo client and schema definitions |
 | `ioredis` | 5.6.1 | Redis client (used via `getRedis()`) |
-| `ccxt` | latest | Exchange client for candle fetching |
 | `functools-kit` | 2.3.0 | Utility belt: `singleshot`, `errorData`, and more |
+| `agent-swarm-kit` | 2.7.0 | Agent orchestration for AI-driven strategies |
+| `dayjs` | 1.11.20 | Date/time manipulation |
 
 <CardGroup cols={2}>
   <Card title="Quickstart" icon="rocket" href="/quickstart">

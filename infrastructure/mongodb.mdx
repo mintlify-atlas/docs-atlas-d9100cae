@@ -1,7 +1,7 @@
 ---
 title: "MongoDB Setup and Persistence for backtest-monorepo-parallel"
 sidebarTitle: "MongoDB"
-description: "Learn how MongoDB provides durable persistence for live-mode subsystems, how atomic upserts work, and which adapters switch to in-memory during backtest replay."
+description: "How MongoDB provides durable persistence for live-mode subsystems, how atomic upserts work, and which adapters switch to in-memory during backtest replay."
 ---
 
 MongoDB serves as the durable persistence layer for all live-mode subsystems in `backtest-monorepo-parallel`. When running in live mode, six subsystems — Session, Storage, Recent, Notification, Memory, and State — write their data through `@backtest-kit/mongo` persist adapters backed by MongoDB. In backtest mode, those same subsystems either switch to local-file adapters or in-memory stores, meaning MongoDB is never touched during replay and replay speed stays at ~6,300× real time.
@@ -132,18 +132,23 @@ The `{ symbol: 1, interval: 1, timestamp: 1 }` unique index is the upsert filter
 | **Notification** | Persist (MongoDB) | In-memory |
 | **Memory** | Persist (MongoDB) | Local file |
 | **State** | Persist (MongoDB) | Local file |
+| **Dump** | Markdown | Markdown |
 | **Markdown** | Dummy (no-op) | Dummy (no-op) |
 | **Log** | JSONL | JSONL |
 
 This configuration comes directly from `config/setup.config.ts`:
 
 ```typescript config/setup.config.ts
-{ SessionLive.usePersist();     SessionBacktest.useLocal();  }
-{ StorageLive.usePersist();     StorageBacktest.useMemory(); }
-{ RecentLive.usePersist();      RecentBacktest.useMemory();  }
+{ Dump.useMarkdown(); }
+
+{ SessionLive.usePersist();     SessionBacktest.useLocal();   }
+{ StorageLive.usePersist();     StorageBacktest.useMemory();  }
+{ RecentLive.usePersist();      RecentBacktest.useMemory();   }
 { NotificationLive.usePersist(); NotificationBacktest.useMemory(); }
-{ MemoryLive.usePersist();      MemoryBacktest.useLocal();   }
-{ StateLive.usePersist();       StateBacktest.useLocal();    }
+{ MemoryLive.usePersist();      MemoryBacktest.useLocal();    }
+{ StateLive.usePersist();       StateBacktest.useLocal();     }
+
+{ Markdown.useDummy(); Log.useJsonl(); }
 ```
 
 Backtest mode never writes to MongoDB. Transient subsystem state (Storage, Recent, Notification) is held in memory and discarded after the run. Session, Memory, and State use local files so they can survive process restarts during iterative backtest development without requiring a running MongoDB instance.

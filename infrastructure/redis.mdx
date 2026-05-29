@@ -1,0 +1,206 @@
+---
+title: "Redis Caching Layer for Fast O(1) Context Lookups"
+sidebarTitle: "Redis"
+description: "Understand how Redis powers the BaseMap O(1) lookup cache, key namespacing with TTL controls, SCAN-based iteration, and how to start the bundled Docker service."
+---
+
+Redis acts as the hot-path lookup cache in `backtest-monorepo-parallel`, sitting in front of MongoDB on every `findByContext` call. Before any query reaches Mongo, `BaseMap` issues a Redis `GET` on `localhost` — a single round-trip that typically resolves in under a millisecond. This O(1) read characteristic is a primary reason the parallel runner sustains ~103 events/second and ~6,300× aggregate real-time replay speed across nine symbols in a single Node process.
+
+## Docker Setup
+
+Start Redis with a single command:
+
+```bash
+docker-compose -f docker/redis/docker-compose.yaml up -d
+```
+
+The full Compose file is reproduced below for reference:
+
+```yaml docker/redis/docker-compose.yaml
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7.4.1
+    container_name: redis
+    ports:
+      - "6379:6379"
+    environment:
+      - REDIS_PASSWORD=mysecurepassword
+    command: ["redis-server", "--requirepass", "mysecurepassword"]
+    volumes:
+      - ./redis_data:/data
+    restart: always
+
+volumes:
+  redis_data:
+```
+
+<Warning>
+  The default password `mysecurepassword` is checked into the repository and is therefore **publicly known**. You must change it before deploying to any environment reachable outside your local machine. Update both the `REDIS_PASSWORD` environment variable and the `--requirepass` argument in the Compose file, then set `CC_REDIS_PASSWORD` in your `.env` to match.
+</Warning>
+
+## Connection Configuration
+
+Redis connection parameters are read from environment variables, with sensible defaults for local development. They are resolved in `packages/core/src/config/params.ts`:
+
+```typescript packages/core/src/config/params.ts
+export const CC_REDIS_HOST     = process.env.CC_REDIS_HOST     || "127.0.0.1";
+export const CC_REDIS_PORT     = parseInt(process.env.CC_REDIS_PORT) || 6379;
+export const CC_REDIS_USER     = process.env.CC_REDIS_USER     || "default";
+export const CC_REDIS_PASSWORD = process.env.CC_REDIS_PASSWORD || "mysecurepassword";
+```
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `CC_REDIS_HOST` | `127.0.0.1` | Hostname or IP address of the Redis server |
+| `CC_REDIS_PORT` | `6379` | TCP port Redis listens on |
+| `CC_REDIS_USER` | `default` | ACL username (Redis 6+ ACL; `default` uses the legacy password mode) |
+| `CC_REDIS_PASSWORD` | `mysecurepassword` | ACL password matching `--requirepass` in the Compose file |
+
+## How `BaseMap` Uses Redis
+
+`BaseMap` is a factory class (using `di-factory`) that wraps an `ioredis` client obtained from `getRedis()` and implements a namespaced, TTL-aware key/value store. Every cache-line operation maps to a single Redis command.
+
+### Key Namespacing
+
+Every key stored by a `BaseMap` instance is prefixed with the instance's `connectionKey`:
+
+```typescript packages/core/src/lib/common/BaseMap.ts
+_getItemKey(key: string): string {
+  return `${this.connectionKey}:${key}`;
+}
+```
+
+This means two `BaseMap` instances with different `connectionKey` values never collide, even when they store entries under the same logical `key`. All scan patterns are scoped to `${connectionKey}:*`.
+
+### Write with Optional TTL
+
+```typescript packages/core/src/lib/common/BaseMap.ts
+async set(key: string, value: unknown): Promise<void> {
+  if (!key) throw new Error("Key cannot be empty");
+
+  const redis = await getRedis();
+  const itemKey = this._getItemKey(key);
+
+  await redis.set(itemKey, value as string);
+
+  if (this.ttlExpireSeconds !== -1) {
+    await redis.expire(itemKey, this.ttlExpireSeconds);
+  }
+}
+```
+
+When `ttlExpireSeconds` is a positive integer, `EXPIRE` is called immediately after `SET`, making the entry evict itself automatically. When `ttlExpireSeconds` is `-1`, the `EXPIRE` call is skipped entirely and the entry persists until explicitly deleted.
+
+<Tip>
+  Pass `-1` as the TTL when constructing a `BaseMap` for cache-only-by-key entries — that is, entries whose invalidation is driven by business logic (e.g. a session close or a position unwind) rather than by wall-clock time. Time-bounded caches should use a positive TTL so stale entries are automatically evicted without manual cleanup.
+</Tip>
+
+The default TTL is `5 * 60` seconds (5 minutes):
+
+```typescript packages/core/src/lib/common/BaseMap.ts
+const DEFAULT_TTL_EXPIRE_SECONDS = 5 * 60;
+
+export const BaseMap = factory(
+  class BaseMap {
+    constructor(
+      readonly connectionKey: string,
+      readonly ttlExpireSeconds: number = DEFAULT_TTL_EXPIRE_SECONDS
+    ) {}
+    // ...
+  }
+);
+```
+
+### Read
+
+```typescript packages/core/src/lib/common/BaseMap.ts
+async get(key: string | null): Promise<unknown | null> {
+  if (key === null) return null;
+  const redis = await getRedis();
+  const value = await redis.get(this._getItemKey(key));
+  return value ?? null;
+}
+```
+
+`get` resolves with `null` on a cache miss, allowing the caller to fall back to MongoDB. No JSON parsing occurs on the critical path — values are stored and returned as raw strings.
+
+### SCAN-Based Iteration
+
+All bulk operations (`clear`, `toArray`, `iterate`, `keys`, `values`, `size`) use Redis `SCAN` with a batch size of 100 to avoid blocking the server:
+
+```typescript packages/core/src/lib/common/BaseMap.ts
+const ITERATOR_BATCH_SIZE = 100;
+
+async clear(): Promise<void> {
+  const redis = await getRedis();
+  let cursor: string | number = 0;
+  const pattern = `${this.connectionKey}:*`;
+
+  while (true) {
+    const [nextCursor, keys] = await redis.scan(
+      cursor, "MATCH", pattern, "COUNT", ITERATOR_BATCH_SIZE
+    );
+    cursor = nextCursor;
+
+    if (keys?.length) {
+      await redis.del(...keys);
+    }
+
+    if (cursor === "0" || cursor === 0) break;
+  }
+}
+```
+
+`SCAN` is non-blocking and cursor-based, so it does not hold a server-side lock across batches. The loop terminates when Redis returns cursor `"0"` (or `0`), indicating the full keyspace has been traversed.
+
+## `BaseMap` API Reference
+
+<Accordion title="set(key, value)">
+  Stores `value` under `connectionKey:key`. Calls `EXPIRE` with `ttlExpireSeconds` unless TTL is `-1`.
+</Accordion>
+
+<Accordion title="get(key)">
+  Returns the stored value as a string, or `null` on a miss. Accepts `null` as input and returns `null` immediately (no Redis round-trip).
+</Accordion>
+
+<Accordion title="has(key)">
+  Returns `true` if `EXISTS` returns `1` for the namespaced key.
+</Accordion>
+
+<Accordion title="delete(key)">
+  Issues `DEL` for the namespaced key. A `null` key is a no-op.
+</Accordion>
+
+<Accordion title="clear()">
+  SCAN-iterates all keys matching `connectionKey:*` in batches of 100, deleting each batch atomically with `DEL`.
+</Accordion>
+
+<Accordion title="toArray()">
+  SCAN-iterates all matching keys and bulk-fetches their values with `MGET`, returning `[key, value]` pairs with the `connectionKey:` prefix stripped from each key.
+</Accordion>
+
+<Accordion title="iterate() / keys() / values()">
+  Async generator variants of `toArray()` for streaming consumption without materialising the full result set.
+</Accordion>
+
+<Accordion title="size()">
+  SCAN-counts all matching keys and returns the total. Does not fetch values.
+</Accordion>
+
+## Adding a New Redis-Cached Lookup
+
+To add a new Redis-backed cache, extend `BaseMap` with your chosen `connectionKey` and TTL strategy:
+
+```typescript
+import { BaseMap } from "@pro/core";
+
+// 5-minute TTL (uses default)
+const positionCache = BaseMap("position", 300);
+
+// No TTL — invalidate manually on position close
+const sessionCache = BaseMap("session", -1);
+```
+
+All `BaseMap` operations are available immediately. No additional Redis configuration is required — the client is shared through the `getRedis()` singleton from `@backtest-kit/mongo`.

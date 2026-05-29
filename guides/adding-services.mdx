@@ -1,0 +1,239 @@
+---
+title: "Add New Services to @pro/core in Five Steps"
+sidebarTitle: "Adding Services"
+description: "Learn how to register a new injectable service, Mongo collection, or Redis-cached lookup in the @pro/core DI container without touching any strategy files."
+---
+
+Every piece of shared infrastructure in this monorepo lives inside `@pro/core` and is injected into `globalThis.core` at startup. Adding a capability — a new database service, a scraper, a Redis cache — follows a fixed, five-step recipe. Strategy files under `./content/` never change; they simply start seeing the new property on `core` after the next build.
+
+## The five-step recipe
+
+<Steps>
+
+### Create the service file
+
+Drop `XService.ts` under `packages/core/src/lib/services/<category>/`. The category is just a directory label — use `db` for Mongo-backed services, `core` for business-logic services, `screen` for data-scraping services, and so on.
+
+A minimal service class has no required base class for pure logic work:
+
+```typescript
+// packages/core/src/lib/services/core/XService.ts
+export class XService {
+  public async doSomething(param: string): Promise<string> {
+    return `result for ${param}`;
+  }
+}
+
+export default XService;
+```
+
+### Register a DI symbol
+
+Open `packages/core/src/lib/core/types.ts` and add one symbol to the relevant group. The existing file shows the pattern:
+
+```typescript
+// packages/core/src/lib/core/types.ts
+const coreServices = {
+  scraperService: Symbol('scraperService'),
+  parserService:  Symbol('parserService'),
+  xService:       Symbol('xService'),   // ← add this
+}
+```
+
+Symbols are the only keys the `di-kit` activator uses for wiring — the string name is for debugging only.
+
+### Wire the provider
+
+Open `packages/core/src/lib/core/provide.ts` and add a `provide(...)` call in the appropriate block (or create a new block for a new category). The `provide` function is imported from the `"pro"` activator created in `di.ts`:
+
+```typescript
+// packages/core/src/lib/core/provide.ts
+import XService from '../services/core/XService';
+import { provide } from './di';
+import TYPES from './types';
+
+{
+  provide(TYPES.scraperService, () => new ScraperService());
+  provide(TYPES.parserService,  () => new ParserService());
+  provide(TYPES.xService,       () => new XService());   // ← add this
+}
+```
+
+### Expose via the `ioc` object
+
+Open `packages/core/src/lib/index.ts` and add one `inject<XService>(...)` entry to the matching group. This is the object that gets assigned to `globalThis.core`:
+
+```typescript
+// packages/core/src/lib/index.ts
+import XService from './services/core/XService';
+
+const coreServices = {
+  scraperService:         inject<ScraperService>(TYPES.scraperService),
+  parserService:          inject<ParserService>(TYPES.parserService),
+  xService:               inject<XService>(TYPES.xService),   // ← add this
+};
+
+export const ioc = {
+  ...baseServices,
+  ...coreServices,
+  ...dbServices,
+  ...screenServices,
+};
+```
+
+### Build to regenerate the type declaration
+
+```bash
+npm run build        # Linux / macOS
+npm run build:win    # Windows
+```
+
+The build walks every package in `./packages/*` with rollup and emits two artifacts for `@pro/core`:
+
+- `packages/core/build/index.cjs` — the CommonJS runtime bundle
+- `packages/core/types.d.ts` — the rolled-up declaration file
+
+After the build, `core.xService` is fully typed everywhere in the workspace via the `tsconfig.json` `paths` alias. Any strategy file can call `core.xService.doSomething(...)` with autocomplete and type-checking — no imports needed.
+
+</Steps>
+
+<Note>
+No file under `./content/` ever needs to change when new services are added. The `globalThis.core` surface is extended automatically because strategy files access it at evaluation time, after the DI container has been initialised by the `@pro/core` bundle.
+</Note>
+
+---
+
+## Adding a new Mongo collection
+
+A Mongo-backed service follows the five steps above, but also requires a schema file and a `BaseCRUD` wrapper.
+
+### 1 — Define the schema
+
+Create `packages/core/src/schema/<Name>.schema.ts`. Model it on the existing `Candle.schema.ts`, which defines a Mongoose model and a **compound unique index** whose shape matches the natural context key for that collection:
+
+```typescript
+// packages/core/src/schema/Candle.schema.ts
+import { CandleInterval } from "backtest-kit";
+import mongoose, { Document, Schema } from "mongoose";
+
+interface ICandleDto {
+  symbol:    string;
+  interval:  CandleInterval;
+  timestamp: number;
+  open:      number;
+  high:      number;
+  low:       number;
+  close:     number;
+  volume:    number;
+}
+
+interface CandleDocument extends ICandleDto, Document {
+  exchangeName: string;
+}
+
+const CandleSchema: Schema<CandleDocument> = new Schema(
+  {
+    symbol:       { type: String, required: true, index: true },
+    interval:     { type: String, required: true, enum: INTERVAL_ENUM, index: true },
+    timestamp:    { type: Number, required: true, index: true },
+    exchangeName: { type: String, required: true, index: true },
+    open:         { type: Number, required: true },
+    high:         { type: Number, required: true },
+    low:          { type: Number, required: true },
+    close:        { type: Number, required: true },
+    volume:       { type: Number, required: true },
+  },
+  { timestamps: { createdAt: "createDate", updatedAt: "updatedDate" } }
+);
+
+// Compound unique index — one candle per (symbol, interval, timestamp)
+CandleSchema.index({ symbol: 1, interval: 1, timestamp: 1 }, { unique: true });
+
+export const CandleModel = mongoose.model<CandleDocument>(
+  "candle-example-items",
+  CandleSchema
+);
+```
+
+The compound unique index is critical: it ensures that concurrent `findOneAndUpdate` upserts from all 9 parallel symbol runners never produce duplicate documents.
+
+### 2 — Wrap in a `BaseCRUD` subclass
+
+`BaseCRUD` is a `di-factory` class factory. Passing your Mongoose model to it gives the subclass `create`, `update`, `findById`, `findByFilter`, `findAll`, `iterate`, and `paginate` for free:
+
+```typescript
+// packages/core/src/lib/services/db/CandleDbService.ts
+import BaseCRUD from "../../common/BaseCRUD";
+import { ICandleDto, ICandleRow, CandleModel } from "../../../schema/Candle.schema";
+import { readTransform } from "../../../utils/readTransform";
+import { inject } from "../../core/di";
+import { TYPES } from "../../core/types";
+import { LoggerService } from "../base/LoggerService";
+
+const EXCHANGE_NAME = "ccxt_binance";
+
+export class CandleDbService extends BaseCRUD(CandleModel) {
+  readonly loggerService = inject<LoggerService>(TYPES.loggerService);
+
+  public create = async (dto: ICandleDto): Promise<ICandleRow> => {
+    this.loggerService.log("candleDbService create", { dto });
+    const filter = {
+      symbol:    dto.symbol,
+      interval:  dto.interval,
+      timestamp: dto.timestamp,
+    };
+    const insertOnly = {
+      exchangeName: EXCHANGE_NAME,
+      open: dto.open, high: dto.high,
+      low:  dto.low,  close: dto.close,
+      volume: dto.volume,
+    };
+    const document = await CandleModel.findOneAndUpdate(
+      filter,
+      { $setOnInsert: insertOnly },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+    return readTransform(document.toJSON()) as unknown as ICandleRow;
+  };
+}
+```
+
+<Tip>
+Use `$setOnInsert` (as `CandleDbService` does) when you want to write the payload only on first insert and leave subsequent upserts as no-ops. Use `$set` when you always want to overwrite with the latest values — both patterns are safe under concurrent writes because Mongo's document-level locking prevents partial updates.
+</Tip>
+
+### 3 — Register, expose, build
+
+Follow steps 2–5 of the five-step recipe above (add a symbol, provide the service, expose it on `ioc`, run `npm run build`).
+
+---
+
+## Adding a new Redis-cached lookup
+
+For O(1) string lookups that should survive between ticks but not require Mongo round-trips, extend `BaseMap`:
+
+```typescript
+// packages/core/src/lib/services/core/SymbolMetaMapService.ts
+import BaseMap from "../../common/BaseMap";
+
+// TTL = 300 s  →  entries expire automatically after 5 minutes
+export class SymbolMetaMapService extends BaseMap(
+  "symbol-meta",   // Redis key prefix, becomes "symbol-meta:<key>"
+  300              // TTL in seconds; pass -1 for permanent cache
+) {}
+
+export default SymbolMetaMapService;
+```
+
+`BaseMap` uses `ioredis` under the hood and exposes `set`, `get`, `delete`, `has`, `clear`, `toArray`, `size`, and async iterators (`iterate`, `keys`, `values`). The `connectionKey` argument namespaces every key as `<connectionKey>:<userKey>` so multiple map services never collide in the same Redis instance.
+
+<CardGroup cols={2}>
+  <Card title="Pass -1 for no TTL" icon="infinity">
+    Keys persist until explicitly deleted. Use this for canonical lookups — exchange metadata, symbol precision, market-open flags — where stale data would cause incorrect signals.
+  </Card>
+  <Card title="Pass positive seconds for time-bounded cache" icon="clock">
+    Entries expire automatically. Use this for price snapshots, order-book depths, or anything where a slightly stale value is acceptable and auto-eviction reduces memory pressure.
+  </Card>
+</CardGroup>
+
+Once the class exists, register it with the five-step recipe exactly as any other service.

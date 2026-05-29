@@ -1,72 +1,91 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mintlify Starter Kit",
+  "name": "backtest-monorepo-parallel",
+  "theme": "aspen",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
-  },
-  "favicon": "/favicon.svg",
-  "navigation": {
-    "pages": [
-      {
-        "group": "Getting Started",
-        "pages": [
-          "index",
-          "quickstart"
-        ]
-      }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
+    "primary": "#1A56DB",
+    "light": "#E8F0FE",
+    "dark": "#0F2D6B"
   },
   "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
     "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://app.mintlify.com"
+      "type": "github",
+      "href": "https://github.com/backtest-kit/backtest-monorepo-parallel"
     }
-  },
-  "contextual": {
-    "options": [
-      "copy",
-      "view",
-      "chatgpt",
-      "claude",
-      "perplexity",
-      "mcp",
-      "cursor",
-      "vscode"
-    ]
   },
   "footer": {
     "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
+      "github": "https://github.com/backtest-kit/backtest-monorepo-parallel"
     }
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "architecture"
+            ]
+          },
+          {
+            "group": "Infrastructure",
+            "pages": [
+              "infrastructure/mongodb",
+              "infrastructure/redis",
+              "infrastructure/environment"
+            ]
+          },
+          {
+            "group": "Running Backtests",
+            "pages": [
+              "guides/mode-a-parallel",
+              "guides/mode-b-single",
+              "guides/live-paper-trading"
+            ]
+          },
+          {
+            "group": "Extending the Monorepo",
+            "pages": [
+              "guides/adding-services",
+              "guides/adding-strategies",
+              "guides/persistence-configuration"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Core Package (@pro/core)",
+            "pages": [
+              "api/ioc-container",
+              "api/base-crud",
+              "api/base-map",
+              "api/services"
+            ]
+          },
+          {
+            "group": "Main Package (@pro/main)",
+            "pages": [
+              "api/cli-flags",
+              "api/entry-points"
+            ]
+          },
+          {
+            "group": "Strategy API",
+            "pages": [
+              "api/strategy-schema",
+              "api/exchange-schema",
+              "api/frame-schema"
+            ]
+          }
+        ]
+      }
+    ]
   }
 }

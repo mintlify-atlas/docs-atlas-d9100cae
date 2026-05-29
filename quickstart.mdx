@@ -1,47 +1,187 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Run Your First Parallel Backtest in Under 10 Minutes"
+sidebarTitle: "Quickstart"
+description: "Install prerequisites, spin up MongoDB and Redis with Docker, build the workspace packages, and execute a 9-symbol parallel backtest with a single command."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
-
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
+This guide takes you from a fresh clone to a running 9-symbol parallel backtest. The entire flow — infrastructure, build, and first run — typically completes in under ten minutes on a machine with a working Docker daemon and Node.js installation.
 
 ## Prerequisites
 
-Before you begin, you must have:
+Before you begin, make sure the following tools are available on your machine:
 
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
+- **Node.js** 20 or later (`node --version`)
+- **Docker** with the Compose plugin (`docker compose version`) or standalone `docker-compose`
+- **Git** (`git --version`)
 
-## Get started
+<Note>
+  Windows users need the `build:win` script (see Step 6). All other steps are identical across platforms.
+</Note>
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
+  <Step title="Clone the repository">
+    Clone the template and enter the project root:
 
     ```bash
-    npm install your-package
+    git clone https://github.com/tripolskypetr/backtest-kit.git
+    cd backtest-kit/backtest-monorepo-parallel
     ```
+
+    Alternatively, use the directory as a template by copying it into your own repository — no monorepo changes are required to add new strategies later.
   </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
+
+  <Step title="Configure environment variables">
+    Copy the example env file and edit the values for your local setup:
 
     ```bash
-    your-cli init
+    cp .env.example .env
     ```
+
+    The variables and their defaults are:
+
+    | Variable | Default | Purpose |
+    |---|---|---|
+    | `CC_MONGO_CONNECTION_STRING` | `mongodb://localhost:27017/backtest-pro?wtimeoutMS=15000` | Mongo connection used by all DbServices |
+    | `CC_REDIS_HOST` | `127.0.0.1` | Redis host for `BaseMap` O(1) lookups |
+    | `CC_REDIS_PORT` | `6379` | Redis port |
+    | `CC_REDIS_USER` | `default` | Redis ACL username |
+    | `CC_REDIS_PASSWORD` | `mysecurepassword` | Redis ACL password |
+    | `CC_SYMBOL_LIST` | `BTCUSDT,POLUSDT,ZECUSDT,HYPEUSDT,XAUTUSDT,DOGEUSDT,SOLUSDT,PENGUUSDT,HBARUSDT` | Comma-separated symbols for Mode A parallel runner |
+
+    The docker-compose files in `docker/mongodb/` and `docker/redis/` are pre-configured to match the defaults above, so no edits are needed for a local first run.
   </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
+
+  <Step title="Start MongoDB">
+    Bring up the MongoDB container in detached mode:
 
     ```bash
-    your-cli start
+    docker-compose -f docker/mongodb/docker-compose.yaml up -d
     ```
+
+    Wait for the container to report `healthy` before proceeding (`docker ps`).
+  </Step>
+
+  <Step title="Start Redis">
+    Bring up the Redis container in detached mode:
+
+    ```bash
+    docker-compose -f docker/redis/docker-compose.yaml up -d
+    ```
+
+    Both containers must be running before you attempt a backtest run.
+  </Step>
+
+  <Step title="Install root dependencies">
+    Install the root-level dependencies (rollup, TypeScript, dev tools):
+
+    ```bash
+    npm install
+    ```
+
+    npm workspaces will also hoist shared dependencies visible to both `packages/core` and `packages/main`.
+  </Step>
+
+  <Step title="Build workspace packages">
+    Build both workspace packages (`@pro/core` and `@pro/main`). The build script walks every directory under `./packages/*`, runs `npm install` and `npm run build` inside each, and emits two artifacts per package:
+
+    - `packages/<pkg>/build/index.cjs` — CommonJS bundle consumed at runtime via `config/alias.config.ts`
+    - `packages/<pkg>/types.d.ts` — rolled-up declaration bundle consumed at compile time via `tsconfig.json` `paths`
+
+    <CodeGroup>
+      ```bash Linux / macOS
+      npm run build
+      ```
+
+      ```bat Windows
+      npm run build:win
+      ```
+    </CodeGroup>
+
+    The underlying shell script (`scripts/linux/build.sh`) is straightforward:
+
+    ```bash
+    #!/bin/bash
+    cd packages
+    for D in `find . -maxdepth 1 -not -path "." -not -path "./.*" -type d`
+    do
+        cd $D
+        echo $D
+        npm install
+        npm run build
+        cd ..
+    done
+    cd ..
+    ```
+
+    A successful build prints the package directory names and exits with code 0. If either package fails, fix the TypeScript error before proceeding — the runtime will fail to resolve `alias.config.ts` entries otherwise.
+  </Step>
+
+  <Step title="Run the parallel backtest (Mode A)">
+    Launch a full 9-symbol parallel backtest using the sample strategy:
+
+    ```bash
+    npm run start -- --backtest --entry --ui --cache \
+      ./content/apr_2026.strategy/apr_2026.strategy.ts
+    ```
+
+    Flag breakdown:
+
+    | Flag | Effect |
+    |---|---|
+    | `--backtest` | Activates backtest mode in `@pro/main` |
+    | `--entry` | Gates `backtest.ts` to iterate `CC_SYMBOL_LIST` and call `Backtest.background(symbol, …)` for each symbol |
+    | `--ui` | Starts the `@backtest-kit/ui` web interface on port **60050** |
+    | `--cache` | Pre-warms candle data into MongoDB before the runners start |
+    | (path argument) | Strategy file loaded by `@backtest-kit/cli` at runtime |
+
+    <Note>
+      Use `--cache` on the first run for every strategy. It pre-warms every symbol's candles from ccxt into MongoDB so the inner replay loop never blocks on HTTP — this is the primary reason the hot path reaches ~6 300× real-time speed. Subsequent runs can omit `--cache` if the candles are already present.
+    </Note>
+  </Step>
+
+  <Step title="Observe the output">
+    Each tick printed to stdout follows this pattern from `apr_2026.strategy.ts`:
+
+    ```
+    active BTCUSDT backtest=1775003640000 now=1779292949309
+    active SOLUSDT backtest=1775003660000 now=1779292949441
+    active DOGEUSDT backtest=1775003640000 now=1779292949512
+    ...
+    ```
+
+    - `backtest=<historicalMs>` — the simulated timestamp inside the replay window
+    - `now=<wallClockMs>` — the actual wall-clock time when the event fired
+
+    The gap between consecutive `now=` values tells you your effective throughput. On a warm cache, expect **≈ 103 events/sec** across 9 symbols on mid-range hardware.
   </Step>
 </Steps>
 
-<Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
+## Optional: open the web UI
 
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
+If you passed `--ui`, the `@backtest-kit/ui` dashboard is available at:
+
+```
+http://localhost:60050
+```
+
+The UI displays equity curves, open positions, and per-symbol metrics updated in real time as the backtest progresses.
+
+<Tip>
+  **Simpler single-symbol runs with Mode B:** Drop the `--entry` flag (and optionally add `--noCache`) to hand control to the `@backtest-kit/cli` built-in runner. It evaluates the strategy file directly, picks up whichever symbol the strategy dispatches internally, and skips the `CC_SYMBOL_LIST` iteration entirely — useful for iterating on a single strategy without spinning up all 9 contexts.
+
+  ```bash
+  npm run start -- --backtest --ui --noCache \
+    ./content/apr_2026.strategy/apr_2026.strategy.ts
+  ```
 </Tip>
+
+## What's next
+
+<CardGroup cols={2}>
+  <Card title="Architecture" icon="sitemap" href="/architecture">
+    Learn how the monorepo, DI container, config layer, and build pipeline fit together.
+  </Card>
+  <Card title="Mode A Parallel Guide" icon="code-branch" href="/guides/mode-a-parallel">
+    Configure symbol lists, tune caching, and add new parallel contexts.
+  </Card>
+</CardGroup>

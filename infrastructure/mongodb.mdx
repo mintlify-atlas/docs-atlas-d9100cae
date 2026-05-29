@@ -1,0 +1,166 @@
+---
+title: "MongoDB Setup and Persistence for backtest-monorepo-parallel"
+sidebarTitle: "MongoDB"
+description: "Learn how MongoDB provides durable persistence for live-mode subsystems, how atomic upserts work, and which adapters switch to in-memory during backtest replay."
+---
+
+MongoDB serves as the durable persistence layer for all live-mode subsystems in `backtest-monorepo-parallel`. When running in live mode, six subsystems — Session, Storage, Recent, Notification, Memory, and State — write their data through `@backtest-kit/mongo` persist adapters backed by MongoDB. In backtest mode, those same subsystems either switch to local-file adapters or in-memory stores, meaning MongoDB is never touched during replay and replay speed stays at ~6,300× real time.
+
+## Docker Setup
+
+The project ships a ready-to-use Compose file. Start MongoDB with a single command:
+
+```bash
+docker-compose -f docker/mongodb/docker-compose.yaml up -d
+```
+
+The full Compose file is reproduced below for reference:
+
+```yaml docker/mongodb/docker-compose.yaml
+version: '3.8'
+services:
+  mongodb:
+    image: mongodb/mongodb-community-server:8.0.4-ubi8
+    container_name: mongodb
+    ports:
+      - '27017:27017'
+    volumes:
+      - ./mongo_data:/data/db
+    restart: always
+volumes:
+  mongo_data:
+```
+
+The service mounts a named volume at `./mongo_data` so data survives container restarts. The `restart: always` policy means MongoDB comes back automatically after a system reboot.
+
+## Connection String
+
+The connection string is configured via the `CC_MONGO_CONNECTION_STRING` environment variable, resolved in `packages/core/src/config/params.ts`:
+
+```typescript packages/core/src/config/params.ts
+export const CC_MONGO_CONNECTION_STRING =
+  process.env.CC_MONGO_CONNECTION_STRING ||
+  "mongodb://localhost:27017/backtest-pro?wtimeoutMS=15000";
+```
+
+<Note>
+  The `wtimeoutMS=15000` query parameter sets a **15-second write-concern timeout**. If a write acknowledgement is not received within 15 seconds — for example because the replica set primary is temporarily unavailable — the driver raises a timeout error rather than waiting indefinitely. For local single-node development this is a generous upper bound; tighten it for production deployments with reliable networks.
+</Note>
+
+## Atomic Upserts with `BaseCRUD`
+
+All database services in `@pro/core` extend `BaseCRUD`, which wraps a Mongoose `Model<any>` and provides `create`, `update`, `findById`, `findByFilter`, `findAll`, `iterate`, and `paginate` out of the box:
+
+```typescript packages/core/src/lib/common/BaseCRUD.ts
+export const BaseCRUD = factory(
+  class {
+    constructor(public readonly TargetModel: Model<any>) {}
+
+    public async update(id: string, dto: object) {
+      const updatedDocument = await this.TargetModel.findByIdAndUpdate(
+        id,
+        omit(dto, "id"),
+        { new: true, runValidators: true }
+      );
+      if (!updatedDocument) {
+        throw new Error(`${this.TargetModel.modelName} not found`);
+      }
+      return readTransform(updatedDocument.toJSON());
+    }
+
+    public async findByFilter(filterData: object, sort?: object) {
+      const item = await this.TargetModel.findOne(filterData, null, { sort });
+      if (item) return readTransform(item.toJSON());
+      return null;
+    }
+
+    public async *iterate(filterData: object = {}, sort?: object) {
+      for await (const document of this.TargetModel.find(filterData, null, { sort })) {
+        yield readTransform(document.toJSON());
+      }
+    }
+  }
+);
+```
+
+For idempotent writes, all 15 persist adapters in the upstream `backtest-kit` template use the pattern:
+
+```typescript
+findOneAndUpdate(
+  { filter: uniqueIndex },
+  { $set: payload },
+  { upsert: true, new: true, setDefaultsOnInsert: true }
+)
+```
+
+This is a single-round-trip atomic operation: no read-then-write, no application-side locking, and no `E11000` duplicate-key retry loop even when nine symbols write concurrently.
+
+## `CandleModel` Compound Unique Index
+
+The `Candle` schema demonstrates the compound index pattern that enables idempotent candle upserts across all supported intervals:
+
+```typescript packages/core/src/schema/Candle.schema.ts
+const CandleSchema: Schema<CandleDocument> = new Schema(
+  {
+    symbol:       { type: String, required: true, index: true },
+    interval:     { type: String, required: true, enum: INTERVAL_ENUM, index: true },
+    timestamp:    { type: Number, required: true, index: true },
+    exchangeName: { type: String, required: true, index: true },
+    open:         { type: Number, required: true },
+    high:         { type: Number, required: true },
+    low:          { type: Number, required: true },
+    close:        { type: Number, required: true },
+    volume:       { type: Number, required: true },
+  },
+  { timestamps: { createdAt: "createDate", updatedAt: "updatedDate" } }
+);
+
+CandleSchema.index({ symbol: 1, interval: 1, timestamp: 1 }, { unique: true });
+```
+
+The `{ symbol: 1, interval: 1, timestamp: 1 }` unique index is the upsert filter. Calling `findOneAndUpdate` against this index guarantees exactly-once candle storage: re-fetching candles (for example on `--cache` re-runs or live resyncs) updates the existing document rather than inserting a duplicate.
+
+## Live vs. Backtest Adapter Matrix
+
+`config/setup.config.ts` wires each subsystem to the correct adapter for its execution context. The table below summarises the full adapter map:
+
+| Subsystem | Live Mode | Backtest Mode |
+|---|---|---|
+| **Session** | Persist (MongoDB via `@backtest-kit/mongo`) | Local file |
+| **Storage** | Persist (MongoDB) | In-memory |
+| **Recent** | Persist (MongoDB) | In-memory |
+| **Notification** | Persist (MongoDB) | In-memory |
+| **Memory** | Persist (MongoDB) | Local file |
+| **State** | Persist (MongoDB) | Local file |
+| **Markdown** | Dummy (no-op) | Dummy (no-op) |
+| **Log** | JSONL | JSONL |
+
+This configuration comes directly from `config/setup.config.ts`:
+
+```typescript config/setup.config.ts
+{ SessionLive.usePersist();     SessionBacktest.useLocal();  }
+{ StorageLive.usePersist();     StorageBacktest.useMemory(); }
+{ RecentLive.usePersist();      RecentBacktest.useMemory();  }
+{ NotificationLive.usePersist(); NotificationBacktest.useMemory(); }
+{ MemoryLive.usePersist();      MemoryBacktest.useLocal();   }
+{ StateLive.usePersist();       StateBacktest.useLocal();    }
+```
+
+Backtest mode never writes to MongoDB. Transient subsystem state (Storage, Recent, Notification) is held in memory and discarded after the run. Session, Memory, and State use local files so they can survive process restarts during iterative backtest development without requiring a running MongoDB instance.
+
+## Adding a New MongoDB Collection
+
+<Steps>
+  <Step title="Define the schema">
+    Create `packages/core/src/schema/<Name>.schema.ts` following the `Candle.schema.ts` pattern. Add a compound unique index whose shape matches your context key.
+  </Step>
+  <Step title="Wrap with BaseCRUD">
+    Create a `<Name>DbService` that extends `BaseCRUD(NameModel)`. This gives you `create`, `update`, `findById`, `findByFilter`, `findAll`, `iterate`, and `paginate` for free.
+  </Step>
+  <Step title="Use atomic upserts for writes">
+    For any write that can be replayed, use `findOneAndUpdate(filter, { $set }, { upsert: true, new: true, setDefaultsOnInsert: true })` to match the atomicity contract of the built-in persist adapters.
+  </Step>
+  <Step title="Register the service">
+    Add a symbol to `packages/core/src/lib/core/types.ts`, a provider to `provide.ts`, and an `ioc` entry to `packages/core/src/lib/index.ts`. Rebuild with `npm run build`.
+  </Step>
+</Steps>

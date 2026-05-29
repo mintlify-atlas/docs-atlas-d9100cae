@@ -1,0 +1,112 @@
+---
+title: "Environment Variables Reference for backtest-monorepo-parallel"
+sidebarTitle: "Environment"
+description: "Complete reference for every environment variable, how CC_SYMBOL_LIST is parsed, when Telegram credentials are required, and how to create your local .env file."
+---
+
+`backtest-monorepo-parallel` is configured entirely through environment variables. Sensible defaults are baked into the two `params.ts` files so the project runs out of the box against a local Docker stack, but you should override them before deploying to any shared or internet-facing environment. This page documents every variable, explains how each one is consumed at runtime, and shows where credentials must never be committed.
+
+## Creating Your `.env` File
+
+Copy the provided example file before your first run:
+
+```bash
+cp .env.example .env
+```
+
+The `.env.example` file contains the minimum set of overrides needed when the Node process runs inside a container (where `localhost` does not resolve to the Docker host):
+
+```bash .env.example
+CC_REDIS_HOST=host.docker.internal
+CC_MONGO_CONNECTION_STRING=mongodb://host.docker.internal:27017/backtest-kit?wtimeoutMS=15000
+```
+
+<Warning>
+  Never commit your `.env` file to version control. It will contain your Redis password (`CC_REDIS_PASSWORD`) and, if you use `--session` mode, your Telegram API credentials (`CC_TELEGRAM_API_ID` and `CC_TELEGRAM_API_HASH`). Add `.env` to `.gitignore` and rotate any credentials that were accidentally pushed.
+</Warning>
+
+## MongoDB
+
+<ParamField path="CC_MONGO_CONNECTION_STRING" type="string" default="mongodb://localhost:27017/backtest-pro?wtimeoutMS=15000">
+  Full MongoDB connection URI consumed by `@backtest-kit/mongo`'s `setup()` call. The `wtimeoutMS=15000` query parameter sets a 15-second write-concern timeout — writes that are not acknowledged within that window raise an error rather than hanging indefinitely. Override to point at a remote cluster or a replica set.
+</ParamField>
+
+## Redis
+
+<ParamField path="CC_REDIS_HOST" type="string" default="127.0.0.1">
+  Hostname or IP address of the Redis server. Set to `host.docker.internal` when the Node process runs inside Docker and Redis is on the host machine (as shown in `.env.example`).
+</ParamField>
+
+<ParamField path="CC_REDIS_PORT" type="number" default="6379">
+  TCP port Redis listens on. Parsed with `parseInt` — non-numeric values fall back to `6379`.
+</ParamField>
+
+<ParamField path="CC_REDIS_USER" type="string" default="default">
+  Redis ACL username. The value `default` uses the legacy single-password mode enabled by `--requirepass` in the Docker Compose file. Set to a named ACL user if your Redis deployment uses Redis 6+ ACLs.
+</ParamField>
+
+<ParamField path="CC_REDIS_PASSWORD" type="string" default="mysecurepassword">
+  Password for the Redis ACL user above. Must match the `--requirepass` value in `docker/redis/docker-compose.yaml`. The default value is publicly known — change it in production.
+</ParamField>
+
+## Parallel Runner Symbol List
+
+<ParamField path="CC_SYMBOL_LIST" type="string" default="BTCUSDT,POLUSDT,ZECUSDT,HYPEUSDT,XAUTUSDT,DOGEUSDT,SOLUSDT,PENGUUSDT,HBARUSDT">
+  Comma-separated list of trading pair symbols for the Mode A parallel runner. Each symbol becomes an independent `Backtest.background(symbol, …)` context running concurrently in the same Node process. Whitespace around commas is stripped.
+</ParamField>
+
+### How `CC_SYMBOL_LIST` Is Parsed
+
+The variable is consumed in `packages/main/src/config/params.ts`:
+
+```typescript packages/main/src/config/params.ts
+function parseSymbolList(envVar: string, fallback: string) {
+  const originList = process.env[envVar] || fallback;
+  return originList
+    .split(",")
+    .map((s) => s.trim());
+}
+
+export const CC_SYMBOL_LIST = parseSymbolList(
+  "CC_SYMBOL_LIST",
+  "BTCUSDT,POLUSDT,ZECUSDT,HYPEUSDT,XAUTUSDT,DOGEUSDT,SOLUSDT,PENGUUSDT,HBARUSDT"
+);
+```
+
+The result is a `string[]` iterated by the `--entry` gate in Mode A. To run a subset of symbols during development, set `CC_SYMBOL_LIST=BTCUSDT,SOLUSDT` in your `.env`.
+
+## Telegram (Session / Scraper Mode Only)
+
+<ParamField path="CC_TELEGRAM_API_ID" type="number" default="31861455">
+  Telegram MTProto application ID, obtained from [my.telegram.org](https://my.telegram.org). Only required when running `--session` mode (QR-code Telegram auth) or the Scraper/Parser pipeline. If neither feature is used, the default placeholder value is harmless.
+</ParamField>
+
+<ParamField path="CC_TELEGRAM_API_HASH" type="string" default="ca60446c67ce250ee4e789c730163449">
+  Telegram MTProto application hash paired with `CC_TELEGRAM_API_ID`. Treat this as a secret — it authenticates your application with Telegram's servers.
+</ParamField>
+
+These values are resolved in `packages/core/src/config/params.ts`:
+
+```typescript packages/core/src/config/params.ts
+export const CC_TELEGRAM_API_ID =
+  parseInt(process.env.CC_TELEGRAM_API_ID) || 31861455;
+export const CC_TELEGRAM_API_HASH =
+  process.env.CC_TELEGRAM_API_HASH || "ca60446c67ce250ee4e789c730163449";
+```
+
+<Note>
+  The `--session` flag enables a QR-code-based Telegram MTProto login that stores the resulting session via `SessionLive.usePersist()` in MongoDB. The Scraper/Parser pipeline uses the same credentials to subscribe to Telegram channels for news-driven signal generation. If you are only running backtests or live strategy mode without Telegram signals, these two variables are never read at runtime.
+</Note>
+
+## Full Variable Summary
+
+| Variable | Default | Required for |
+|---|---|---|
+| `CC_MONGO_CONNECTION_STRING` | `mongodb://localhost:27017/backtest-pro?wtimeoutMS=15000` | All modes (live writes; backtest reads candles) |
+| `CC_REDIS_HOST` | `127.0.0.1` | All modes (`BaseMap` cache lookups) |
+| `CC_REDIS_PORT` | `6379` | All modes |
+| `CC_REDIS_USER` | `default` | All modes |
+| `CC_REDIS_PASSWORD` | `mysecurepassword` | All modes |
+| `CC_SYMBOL_LIST` | `BTCUSDT,POLUSDT,…` | Mode A parallel runner (`--entry` flag) |
+| `CC_TELEGRAM_API_ID` | `31861455` | `--session` mode and Scraper/Parser pipeline only |
+| `CC_TELEGRAM_API_HASH` | `ca60446c67ce250ee4e789c730163449` | `--session` mode and Scraper/Parser pipeline only |

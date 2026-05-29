@@ -1,0 +1,132 @@
+---
+title: "Frame Schema API: Backtest Time Windows and Intervals"
+sidebarTitle: "Frame Schema"
+description: "Configure backtest time windows with addFrameSchema, choose candle intervals, understand startDate and endDate alignment with cacheCandles, and replay performance numbers."
+---
+
+A frame schema defines the temporal boundaries of a backtest — the start date, end date, and candle interval that the engine uses when replaying historical market data. It is registered via `addFrameSchema` alongside the exchange and strategy schemas, and is resolved by name when `Backtest.background` dispatches a parallel runner. Without a registered frame, `backtest.ts` throws `"Frame not specified"` before any runners are launched.
+
+---
+
+## addFrameSchema
+
+Registers a named backtest time window.
+
+```typescript
+addFrameSchema({
+  frameName: string;
+  interval: string;
+  startDate: Date;
+  endDate: Date;
+})
+```
+
+### Parameters
+
+<ParamField path="frameName" type="string" required>
+  Unique identifier for this frame. Must match the `frameName` passed to `Backtest.background(symbol, { frameName })`. Also used by `listFrameSchema()` in `backtest.ts` to retrieve the registered frame for the `--cache` pre-warm step.
+
+  ```typescript
+  // Referenced in backtest.ts
+  const [frameSchema] = await listFrameSchema();
+  Backtest.background(symbol, {
+    exchangeName: exchangeSchema.exchangeName,
+    strategyName: strategySchema.strategyName,
+    frameName: frameSchema.frameName,
+  });
+  ```
+</ParamField>
+
+<ParamField path="interval" type="string" required>
+  Candle interval string. Must be one of the values supported by `backtest-kit`'s internal `Candle.schema.ts` interval enum:
+
+  | Value | Description |
+  |---|---|
+  | `'1m'` | 1 minute |
+  | `'3m'` | 3 minutes |
+  | `'5m'` | 5 minutes |
+  | `'15m'` | 15 minutes |
+  | `'30m'` | 30 minutes |
+  | `'1h'` | 1 hour |
+  | `'2h'` | 2 hours |
+  | `'4h'` | 4 hours |
+  | `'6h'` | 6 hours |
+  | `'8h'` | 8 hours |
+  | `'1d'` | 1 day |
+
+  The `apr_2026` strategy uses `'1m'` to maximise signal resolution across the 27-day window. Coarser intervals reduce total tick count at the cost of intra-candle precision.
+</ParamField>
+
+<ParamField path="startDate" type="Date" required>
+  Inclusive start of the backtest window. The engine fetches candles from this timestamp forward. Must be an exact UTC boundary aligned to the chosen interval — e.g. midnight UTC for `'1m'` or `'1d'` frames.
+
+  ```typescript
+  startDate: new Date("2026-04-01T00:00:00Z")
+  ```
+</ParamField>
+
+<ParamField path="endDate" type="Date" required>
+  Inclusive end of the backtest window. Candles at exactly `endDate` are included in the replay. The `--cache` pre-warm in `backtest.ts` passes this value directly to `cacheCandles` as the `to` parameter.
+
+  ```typescript
+  endDate: new Date("2026-04-27T00:00:00Z")
+  ```
+</ParamField>
+
+---
+
+## listFrameSchema
+
+Companion function that retrieves all registered frame schemas at runtime.
+
+```typescript
+const [frameSchema] = await listFrameSchema();
+// frameSchema.frameName  → "apr_2026_frame"
+// frameSchema.startDate  → Date("2026-04-01T00:00:00Z")
+// frameSchema.endDate    → Date("2026-04-27T00:00:00Z")
+// frameSchema.interval   → "1m"
+```
+
+Used in two places inside `backtest.ts`:
+
+1. **Schema validation** — if `listFrameSchema()` returns an empty array, the module throws before any runners are launched.
+2. **Cache pre-warm** — `CACHE_CANDLES_FN` destructures `startDate` and `endDate` from the first registered frame schema to call `cacheCandles` for every symbol.
+
+---
+
+## Reference frame: apr_2026_frame
+
+```typescript
+// content/apr_2026.strategy/modules/backtest.module.ts
+addFrameSchema({
+  frameName: "apr_2026_frame",
+  interval: "1m",
+  startDate: new Date("2026-04-01T00:00:00Z"),
+  endDate: new Date("2026-04-27T00:00:00Z"),
+});
+```
+
+<Note>
+  The `startDate` and `endDate` values must cover the same range you pass to `cacheCandles` when using `--cache`. If the frame and the cache window are misaligned, the engine will fall back to live ccxt HTTP fetches for the uncached portion, significantly slowing the hot loop. Always run `--cache` with the same strategy file that registers your frame before starting the parallel backtest.
+</Note>
+
+---
+
+## Replay performance
+
+The `2026-04-01 → 2026-04-27` frame at `1m` granularity produces **38 880 candles per symbol** (27 days × 1 440 minutes/day). Across all nine default symbols that is approximately **350 000 candle ticks** total.
+
+| Metric | Value |
+|---|---|
+| Frame window | 27 days (`2026-04-01 → 2026-04-27`) |
+| Candles per symbol | 38 880 (27 × 1 440 @ 1m) |
+| Total candle ticks (9 symbols) | ~350 000 |
+| Aggregate replay speed | ~6 326× real-time |
+| Event throughput (single Node process) | ~103 events/sec |
+| Wall-clock time for full frame | On the order of a few minutes with pre-warmed cache |
+
+These numbers were measured on a HP Victus 15-FA1022CI laptop (i5-13420H, 16 GB DDR4-3200, NVMe SSD) with Mongo + Redis running on the same machine via `docker-compose`. The per-symbol replay speed is approximately **703× real-time**; with nine symbols running concurrently in the same Node process the aggregate speed reaches **~6 326× real-time**.
+
+<Tip>
+  The frame window is entirely determined by `startDate` and `endDate` — there is no separate "duration" field. To extend or shorten the replay, edit these two values and re-run with `--cache` to pre-warm the new date range before starting the parallel runners.
+</Tip>

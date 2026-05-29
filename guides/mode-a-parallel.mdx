@@ -1,0 +1,132 @@
+---
+title: "Run All 9 Symbols in Parallel With Mode A"
+sidebarTitle: "Mode A: Parallel"
+description: "Learn how the --entry flag activates the parallel runner in backtest.ts, pre-warms candles via --cache, and drives 9 symbol backtests concurrently in a single Node process."
+---
+
+Mode A is the high-throughput path for backtesting. When you pass the `--entry` flag, `packages/main/src/main/backtest.ts` becomes the orchestrator: it reads every symbol from `CC_SYMBOL_LIST`, optionally pre-warms their candles into MongoDB, and then fires a concurrent `Backtest.background(symbol, ...)` call for each one — all inside a **single Node process** sharing one event loop, one Mongo connection pool, and one Redis pool. No subprocesses, no IPC, no fork overhead.
+
+## The exact command
+
+```bash
+npm run start -- --backtest --entry --ui --cache ./content/apr_2026.strategy/apr_2026.strategy.ts
+```
+
+## Flag breakdown
+
+| Flag | Type | Effect |
+|---|---|---|
+| `--backtest` | boolean | Activates backtest mode; without it every mode gate early-returns |
+| `--entry` | boolean | Unlocks the parallel runner gate in `backtest.ts`; omitting it switches to Mode B |
+| `--ui` | boolean | Starts the `@backtest-kit/ui` web dashboard on port **60050** |
+| `--cache` | boolean | Runs `CACHE_CANDLES_FN` before starting runners to pre-warm candles into Mongo |
+
+<Note>
+  `--cache` only needs to be passed on the first run, or whenever the frame dates change in `addFrameSchema`. On subsequent runs against the same date window the candles are already in Mongo and the flag can be omitted.
+</Note>
+
+## How the parallel runner works
+
+<Steps>
+  <Step title="Load schemas from the strategy file">
+    After the `@backtest-kit/cli` loads the path argument (`./content/apr_2026.strategy/apr_2026.strategy.ts`), the file's top-level calls to `addStrategySchema`, `addExchangeSchema` (via the sibling `backtest.module.ts`), and `addFrameSchema` register three schemas. The `waitForReady(true)` call in `backtest.ts` blocks until all three are in place.
+  </Step>
+  <Step title="Pre-warm candles (--cache only)">
+    `CACHE_CANDLES_FN` iterates `CC_SYMBOL_LIST` and calls `cacheCandles` for each symbol, passing `exchangeName`, `from`, `to`, and `interval: "1m"` sourced from the registered schemas. This is a one-time HTTP fetch from the exchange that seeds Mongo so the hot loop never blocks on ccxt again.
+
+    ```typescript
+    const CACHE_CANDLES_FN = async () => {
+      const [exchangeSchema] = await listExchangeSchema();
+      const [frameSchema] = await listFrameSchema();
+      for (const symbol of CC_SYMBOL_LIST) {
+        await cacheCandles({
+          exchangeName: exchangeSchema.exchangeName,
+          from: frameSchema.startDate,
+          to: frameSchema.endDate,
+          interval: "1m",
+          symbol,
+        });
+      }
+    };
+    ```
+  </Step>
+  <Step title="Launch background backtests">
+    For every symbol in `CC_SYMBOL_LIST`, the runner calls `Backtest.background(symbol, ...)` with the registered `exchangeName`, `strategyName`, and `frameName`. The calls are **not** awaited in a sequence — each one starts its own async context immediately, so all 9 run concurrently.
+
+    ```typescript
+    for (const symbol of CC_SYMBOL_LIST) {
+      Backtest.background(symbol, {
+        exchangeName: exchangeSchema.exchangeName,
+        strategyName: strategySchema.strategyName,
+        frameName: frameSchema.frameName,
+      });
+    }
+    ```
+  </Step>
+  <Step title="Observe progress in the terminal">
+    The `listenActivePing` handler in `apr_2026.strategy.ts` logs a line on every tick:
+
+    ```
+    active <SYMBOL> backtest=<historicalMs> now=<wallClockMs>
+    ```
+
+    `backtest` is the historical timestamp being replayed; `now` is the wall-clock time of the Node process. Watching both columns lets you gauge replay speed in real time.
+  </Step>
+</Steps>
+
+## The default symbol list
+
+`CC_SYMBOL_LIST` is parsed at startup from the `CC_SYMBOL_LIST` environment variable, falling back to a hardcoded default:
+
+```typescript
+export const CC_SYMBOL_LIST = parseSymbolList(
+  "CC_SYMBOL_LIST",
+  "BTCUSDT,POLUSDT,ZECUSDT,HYPEUSDT,XAUTUSDT,DOGEUSDT,SOLUSDT,PENGUUSDT,HBARUSDT"
+);
+```
+
+<Tip>
+  Set `CC_SYMBOL_LIST=BTCUSDT,SOLUSDT` in your `.env` file (or as a shell export) to narrow the parallel runner to just the symbols you care about, without touching any source code. This is the fastest way to iterate on a subset before committing to a full 9-symbol run.
+</Tip>
+
+## Measured performance
+
+The numbers below were captured against a **hot Mongo + Redis cache** on a commodity developer laptop (HP Victus 15-FA1022CI) — not a server.
+
+| Metric | Value |
+|---|---|
+| Wall-clock span (first → last event) | `1779292952202 − 1779292949309` = **2 893 ms** (~2.9 s) |
+| Total events captured | **297** |
+| Symbols running in parallel | **9** (BTC, POL, ZEC, HYPE, XAUT, DOGE, SOL, PENGU, HBAR) |
+| Historical time advanced per symbol | `1775003640000 − 1775001600000` = **2 040 000 ms** = **34 minutes** |
+| Per-symbol replay speed | 34 min historical ÷ 2.9 s wall = **≈ 703×** real-time |
+| Aggregate replay speed (9 symbols) | 9 × 703 = **≈ 6 326×** real-time |
+| Event throughput | 297 ev / 2.893 s = **≈ 103 events/sec** |
+| Frame coverage | `2026-04-01 → 2026-04-27` = 27 days × 1m candles = **38 880 candles/symbol × 9** ≈ **350 000 candle ticks** |
+
+### Test bench
+
+| Component | Spec |
+|---|---|
+| CPU | 13th Gen Intel® Core™ i5-13420H — 8 cores / 12 threads, base 2.10 GHz |
+| RAM | 16 GB DDR4-3200 |
+| Storage | Samsung NVMe SSD, 512 GB |
+| Runtime | Single Node process; Mongo + Redis on the same machine via docker-compose |
+
+### Why it's so fast
+
+<Accordion title="Single-process concurrency">
+  All 9 `Backtest.background(...)` calls share one Node event loop, one Mongo connection pool, and one Redis pool. There is no IPC, no subprocess fork overhead, and no serialisation cost between symbol contexts.
+</Accordion>
+<Accordion title="Redis O(1) lookup cache">
+  Every `findByContext(...)` call hits a Redis `GET` on localhost before falling back to Mongo. `BaseMap` stores strings only — no JSON parse on the cache key.
+</Accordion>
+<Accordion title="Atomic Mongo upserts">
+  Every `write*Data(...)` is a single `findOneAndUpdate({ filter: uniqueIndex, $set: payload }, { upsert, new })`. No read-modify-write cycle, no application-level locks, no E11000 retry loops under concurrent symbol writes.
+</Accordion>
+<Accordion title="Cached candles eliminate HTTP">
+  After `--cache` pre-warms the candle store, the inner replay loop reads pure Mongo + local I/O. The ccxt HTTP layer is never touched again during the run.
+</Accordion>
+<Accordion title="JIT-friendly hot path">
+  The per-tick body in `apr_2026.strategy.ts` is ~30 lines of synchronous arithmetic plus a few awaited helpers. V8 inlines the hot path aggressively after the first few hundred ticks.
+</Accordion>

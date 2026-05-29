@@ -1,0 +1,274 @@
+---
+title: "Monorepo Architecture: DI, Build Pipeline, and Config Layer"
+sidebarTitle: "Architecture"
+description: "How the workspace packages, zero-import DI runtime, rollup build pipeline, and config layer are wired together in backtest-monorepo-parallel."
+---
+
+`backtest-monorepo-parallel` is organized as an npm workspaces monorepo. Two publishable packages (`@pro/core` and `@pro/main`) handle all shared infrastructure. Strategy files under `./content/` are loaded at runtime by `@backtest-kit/cli` and are intentionally never bundled into either package. The `config/` directory bridges the two worlds — it wires persistence adapters, resolves CJS paths, and initializes the database connections before any strategy code runs.
+
+## Workspace layout
+
+The table below maps every top-level directory to its purpose:
+
+| Path | Package / role |
+|---|---|
+| `packages/core/` | `@pro/core` — DI container, services, schemas, Redis/Mongo helpers |
+| `packages/main/` | `@pro/main` — entry point dispatcher, CLI flag reader, mode files |
+| `content/` | Strategy files loaded at runtime by `@backtest-kit/cli`; never bundled |
+| `config/` | `alias.config.ts`, `loader.config.ts`, `setup.config.ts` — runtime wiring |
+| `docker/` | `docker-compose.yaml` files for MongoDB and Redis |
+| `scripts/` | `linux/build.sh` and `win/build.bat` — per-platform build walkers |
+| `tsconfig.json` | Root TypeScript config; maps `@pro/core` and `@pro/main` to `types.d.ts` |
+| `package.json` | Root manifest; declares `workspaces: ["./packages/*"]` and top-level scripts |
+
+<Note>
+  The `tsconfig.json` `include` array covers only `./config` and `./content` — not `./packages`. Each package has its own `tsconfig.json` and is compiled independently by rollup. The root config exists solely to give strategy files and config files correct type-checking through the `paths` aliases described below.
+</Note>
+
+## `@pro/core`: the DI container
+
+All shared services live in `packages/core/`. The DI runtime is built on `di-kit`'s `createActivator`, which returns three primitives tied to a named scope (`"pro"`):
+
+```typescript
+// packages/core/src/lib/core/di.ts
+import { createActivator } from "di-kit";
+
+export const { init, inject, provide } = createActivator("pro");
+```
+
+### TYPES symbol registry
+
+Every service is identified by a unique `Symbol`. They are gathered in a single `TYPES` object:
+
+```typescript
+// packages/core/src/lib/core/types.ts
+const baseServices = {
+    loggerService: Symbol('loggerService'),
+};
+
+const dbServices = {
+    candleDbService: Symbol('candleDbService'),
+}
+
+const coreServices = {
+    scraperService: Symbol('scraperService'),
+    parserService: Symbol('parserService'),
+}
+
+const screenServices = {
+    cryptoYodaScreenService: Symbol('cryptoYodaScreenService'),
+}
+
+export const TYPES = {
+    ...baseServices,
+    ...dbServices,
+    ...coreServices,
+    ...screenServices,
+}
+
+export default TYPES;
+```
+
+### Service registration
+
+`provide.ts` maps each symbol to a factory function. The factories are grouped in blocks that mirror the `TYPES` categories:
+
+```typescript
+// packages/core/src/lib/core/provide.ts
+import { provide } from "./di";
+import TYPES from "./types";
+
+{
+    provide(TYPES.loggerService, () => new LoggerService());
+}
+
+{
+    provide(TYPES.candleDbService, () => new CandleDbService());
+}
+
+{
+    provide(TYPES.scraperService, () => new ScraperService());
+    provide(TYPES.parserService, () => new ParserService());
+}
+
+{
+    provide(TYPES.cryptoYodaScreenService, () => new CryptoYodaScreenService());
+}
+```
+
+### `ioc` assembly and `globalThis` assignment
+
+`packages/core/src/lib/index.ts` imports `provide.ts` (as a side-effect), calls `inject<T>()` for each service, composes the `ioc` object, calls `init()` to resolve the container, then assigns `ioc` to `globalThis.core`:
+
+```typescript
+// packages/core/src/lib/index.ts
+import "./core/provide";
+import { inject, init } from "./core/di";
+import TYPES from "./core/types";
+
+export const ioc = {
+  loggerService: inject<LoggerService>(TYPES.loggerService),
+  candleDbService: inject<CandleDbService>(TYPES.candleDbService),
+  scraperService: inject<ScraperService>(TYPES.scraperService),
+  parserService: inject<ParserService>(TYPES.parserService),
+  cryptoYodaScreenService: inject<CryptoYodaScreenService>(TYPES.cryptoYodaScreenService),
+};
+
+init();
+
+declare global {
+  var core: typeof ioc;
+}
+
+Object.assign(globalThis, { core: ioc });
+```
+
+`packages/core/src/index.ts` is a single re-export: `export { ioc } from "./lib";`. The rollup build bundles this into `packages/core/build/index.cjs` and emits the global augmentation into `packages/core/types.d.ts`.
+
+## `@pro/main`: entry point dispatcher
+
+`packages/main/` reads CLI flags from `getArgs()` and conditionally activates one of four mode files:
+
+<Tabs>
+  <Tab title="Mode A — parallel (--entry)">
+    When `--entry` is present, `backtest.ts` reads `CC_SYMBOL_LIST` (default: 9 USDT pairs) and calls `Backtest.background(symbol, …)` for each symbol. All contexts run concurrently in the same Node event loop, sharing one Mongo connection pool and one Redis pool.
+  </Tab>
+  <Tab title="Mode B — single-symbol (no --entry)">
+    Without `--entry`, `backtest.ts` early-returns. The `@backtest-kit/cli` built-in runner takes over: it loads the strategy file, evaluates the schemas registered inside it, and runs a single backtest on whichever symbol the strategy dispatches internally.
+  </Tab>
+  <Tab title="Live / Paper / Session">
+    The `live.ts`, `paper.ts`, and `session.ts` modes are gated on their own flags (`--live`, `--paper`, `--session`). They share the same DI container and persistence layer as the backtest modes, but target live exchange connections or Telegram session auth instead.
+  </Tab>
+</Tabs>
+
+`packages/main/src/index.ts` re-exports all mode files so the rollup bundle captures every entry point in a single `build/index.cjs` artifact.
+
+## `config/` layer
+
+The `config/` directory contains three files that run before any strategy code:
+
+<Accordion title="alias.config.ts — CJS path resolution">
+  Maps the npm package names to their built CJS artifacts so `@backtest-kit/cli` can `require()` them at runtime:
+
+  ```typescript
+  // config/alias.config.ts
+  export default {
+      "@pro/core": require("../packages/core/build/index.cjs"),
+      "@pro/main": require("../packages/main/build/index.cjs"),
+  }
+  ```
+
+  This is the runtime complement to the compile-time `tsconfig.json` `paths` aliases.
+</Accordion>
+
+<Accordion title="loader.config.ts — initialization sequence">
+  Waits for the Mongo connection to resolve, then imports `@pro/core` (triggering the `globalThis.core` assignment) and `@pro/main` (registering the mode dispatchers):
+
+  ```typescript
+  // config/loader.config.ts
+  import { waitForInit } from "@backtest-kit/mongo";
+
+  import "@pro/core";
+  import "@pro/main";
+
+  export default async () => {
+      await waitForInit();
+  }
+  ```
+
+  `waitForInit()` resolves once `mongoose.connect()` inside `@backtest-kit/mongo` completes. Only after that promise resolves does `@backtest-kit/cli` begin evaluating strategy files — ensuring `core.*` is always populated before any strategy code runs.
+</Accordion>
+
+<Accordion title="setup.config.ts — persistence adapters">
+  Declares which adapter each backtest-kit subsystem uses. The current split runs **Live** mode against Mongo (durable) and most **Backtest** mode adapters against in-memory or local-file stores (fast):
+
+  | Subsystem | Live | Backtest |
+  |---|---|---|
+  | Session | Persist (Mongo) | Local file |
+  | Storage | Persist | Memory |
+  | Recent | Persist | Memory |
+  | Notification | Persist | Memory |
+  | Memory | Persist | Local file |
+  | State | Persist | Local file |
+  | Markdown | Dummy (no-op) | Dummy |
+  | Log | JSONL | JSONL |
+
+  Switching any adapter is one line in this file.
+</Accordion>
+
+## Build pipeline
+
+Each package builds independently with rollup and emits two artifacts:
+
+```
+packages/
+  core/
+    build/index.cjs     ← runtime bundle (required by alias.config.ts)
+    types.d.ts          ← rolled-up declarations (referenced by tsconfig.json paths)
+  main/
+    build/index.cjs
+    types.d.ts
+```
+
+The root `scripts/linux/build.sh` walks `./packages/*` and runs `npm install && npm run build` inside each directory:
+
+```bash
+#!/bin/bash
+cd packages
+for D in `find . -maxdepth 1 -not -path "." -not -path "./.*" -type d`
+do
+    cd $D
+    echo $D
+    npm install
+    npm run build
+    cd ..
+done
+cd ..
+```
+
+`npm run build` at the root delegates to this script (or `scripts/win/build.bat` on Windows via `npm run build:win`). Both call `rollup -c` inside each package — `@rollup/plugin-typescript` compiles the source; `rollup-plugin-dts` bundles the declarations into the single `types.d.ts` file.
+
+## Zero-import DI via `tsconfig.json` paths
+
+The compile-time half of the zero-import pattern is a two-line `paths` configuration in the root `tsconfig.json`:
+
+```json
+{
+  "compilerOptions": {
+    "paths": {
+      "@pro/core": ["./packages/core/types.d.ts"],
+      "@pro/main": ["./packages/main/types.d.ts"]
+    }
+  },
+  "include": [
+    "./config",
+    "./content"
+  ]
+}
+```
+
+<Note>
+  Because `types.d.ts` contains `declare global { var core: typeof ioc }`, TypeScript resolves `core.*` everywhere inside `./config` and `./content` **without any import statement**. The strategy author never needs to know that `@pro/core` exists — `core.candleDbService`, `core.scraperService`, and every other service are simply available as global identifiers with full IntelliSense. At runtime, `loader.config.ts` ensures the same object is present on `globalThis` before the strategy file is evaluated.
+</Note>
+
+## Adding new services (scaling pattern)
+
+The monorepo is designed to grow without restructuring. Adding a new service follows a five-step recipe:
+
+<Steps>
+  <Step title="Create the service file">
+    Drop `XService.ts` under `packages/core/src/lib/services/<category>/`.
+  </Step>
+  <Step title="Register the symbol">
+    Add `xService: Symbol('xService')` to `TYPES` in `packages/core/src/lib/core/types.ts`.
+  </Step>
+  <Step title="Register the provider">
+    Add `provide(TYPES.xService, () => new XService())` to `packages/core/src/lib/core/provide.ts`.
+  </Step>
+  <Step title="Expose on ioc">
+    Add `xService: inject<XService>(TYPES.xService)` to the `ioc` object in `packages/core/src/lib/index.ts`.
+  </Step>
+  <Step title="Rebuild">
+    Run `npm run build`. The regenerated `types.d.ts` immediately makes `core.xService` available as a globally typed, runtime-callable property in every file under `./content/` — no changes to strategy files required.
+  </Step>
+</Steps>

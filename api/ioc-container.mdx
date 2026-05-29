@@ -1,0 +1,207 @@
+---
+title: "IoC Container & Dependency Injection in @pro/core"
+sidebarTitle: "IoC Container"
+description: "Understand the symbol-keyed IoC container powering @pro/core: how services are registered with provide(), resolved with inject(), and surfaced as core.xService globals."
+---
+
+The `@pro/core` package ships a lightweight IoC container built on top of `di-kit`. When the package is imported, it automatically registers all core services as lazy singletons, wires them together, and exposes the fully-resolved `ioc` object on `globalThis.core` — meaning any strategy file can write `core.candleDbService` without a single import statement.
+
+## How it works
+
+The container is created by calling `createActivator('pro')` from `di-kit`, which returns three primitives: `provide`, `inject`, and `init`. The activator is **symbol-scoped** — every token in the `TYPES` registry is a unique JavaScript `Symbol`, which prevents name collisions across packages sharing the same global runtime.
+
+```typescript
+// packages/core/src/lib/core/di.ts
+import { createActivator } from "di-kit";
+
+export const { init, inject, provide } = createActivator("pro");
+```
+
+`provide` registers a factory under a symbol token. `inject` returns a lazy proxy that resolves the singleton on first property access. `init` walks every registered factory and triggers instantiation, ensuring all singletons are warmed up before strategies run.
+
+## TYPES registry
+
+Every injectable service is identified by a `Symbol` stored in the `TYPES` constant. Using symbols — rather than string keys — guarantees that two packages can each define a `loggerService` token without shadowing each other.
+
+```typescript
+// packages/core/src/lib/core/types.ts
+const baseServices = {
+    loggerService: Symbol('loggerService'),
+};
+
+const dbServices = {
+    candleDbService: Symbol('candleDbService'),
+};
+
+const coreServices = {
+    scraperService: Symbol('scraperService'),
+    parserService: Symbol('parserService'),
+};
+
+const screenServices = {
+    cryptoYodaScreenService: Symbol('cryptoYodaScreenService'),
+};
+
+export const TYPES = {
+    ...baseServices,
+    ...dbServices,
+    ...coreServices,
+    ...screenServices,
+};
+
+export default TYPES;
+```
+
+| Token | Service class |
+|---|---|
+| `TYPES.loggerService` | `LoggerService` |
+| `TYPES.candleDbService` | `CandleDbService` |
+| `TYPES.scraperService` | `ScraperService` |
+| `TYPES.parserService` | `ParserService` |
+| `TYPES.cryptoYodaScreenService` | `CryptoYodaScreenService` |
+
+## The `ioc` export object
+
+`lib/index.ts` imports `./core/provide` (side-effectful — registers all factories), builds named property groups by calling `inject<T>(token)` for each service, merges them into the `ioc` export, and then immediately calls `init()`.
+
+```typescript
+// packages/core/src/lib/index.ts
+import "./core/provide";
+import { inject, init } from "./core/di";
+import TYPES from "./core/types";
+
+import LoggerService from "./services/base/LoggerService";
+import ScraperService from "./services/core/ScraperService";
+import ParserService from "./services/core/ParserService";
+import CryptoYodaScreenService from "./services/screen/CryptoYodaScreenService";
+import CandleDbService from "./services/db/CandleDbService";
+
+const baseServices = {
+  loggerService: inject<LoggerService>(TYPES.loggerService),
+};
+
+const dbServices = {
+  candleDbService: inject<CandleDbService>(TYPES.candleDbService),
+};
+
+const coreServices = {
+  scraperService: inject<ScraperService>(TYPES.scraperService),
+  parserService: inject<ParserService>(TYPES.parserService),
+};
+
+const screenServices = {
+  cryptoYodaScreenService: inject<CryptoYodaScreenService>(
+    TYPES.cryptoYodaScreenService
+  ),
+};
+
+export const ioc = {
+  ...baseServices,
+  ...coreServices,
+  ...dbServices,
+  ...screenServices,
+};
+
+init();
+
+declare global {
+  var core: typeof ioc;
+}
+
+Object.assign(globalThis, { core: ioc });
+
+export default ioc;
+```
+
+`src/index.ts` simply re-exports:
+
+```typescript
+// packages/core/src/index.ts
+export { ioc } from "./lib";
+```
+
+<Note>
+`init()` is called immediately in `lib/index.ts` as part of module evaluation. It triggers **lazy singleton instantiation** for every factory registered via `provide()` — any service that internally calls `inject()` will have its dependency resolved at this moment. You never need to call `init()` yourself when consuming `@pro/core`.
+</Note>
+
+## API reference
+
+### `provide(token, factory)`
+
+Registers a factory function under a symbol token. The factory is called at most once (singleton semantics). Subsequent calls to `inject(token)` return the same instance.
+
+<ParamField path="token" type="symbol" required>
+  A `Symbol` from the `TYPES` registry that uniquely identifies the service.
+</ParamField>
+
+<ParamField path="factory" type="() => T" required>
+  A zero-argument factory function that constructs and returns the service instance. Called lazily when `init()` runs.
+</ParamField>
+
+```typescript
+import { provide } from "@pro/core";
+import TYPES from "./core/types";
+import MyService from "./MyService";
+
+provide(TYPES.loggerService, () => new MyService());
+```
+
+---
+
+### `inject<T>(token)`
+
+Returns a lazy proxy for the service bound to `token`. The proxy resolves the real singleton on first property access. Multiple calls with the same token return the same proxy.
+
+<ParamField path="token" type="symbol" required>
+  A `Symbol` from the `TYPES` registry identifying the desired service.
+</ParamField>
+
+**Returns:** `T` — a proxy that behaves exactly like the resolved service instance.
+
+```typescript
+import { inject } from "@pro/core";
+import TYPES from "./core/types";
+import type CandleDbService from "./services/db/CandleDbService";
+
+// Inside a class — resolved lazily on first use
+readonly candleDbService = inject<CandleDbService>(TYPES.candleDbService);
+```
+
+---
+
+### `init()`
+
+Triggers eager instantiation of all registered factories. After `init()` returns, every `inject()` proxy is backed by a fully constructed singleton.
+
+<Note>
+`init()` is called automatically inside `lib/index.ts` — you do **not** need to call it in application code or strategy files.
+</Note>
+
+---
+
+## Using services in strategy files
+
+Strategy files can access any service through the `core` global without importing anything from `@pro/core`. Type safety is provided by the rolled-up declaration file (`packages/core/types.d.ts`) which is mapped via `tsconfig.json` `paths` so that `globalThis.core` resolves to `typeof ioc`.
+
+```typescript
+// strategies/my-strategy.ts — no imports required
+
+async function run(date: Date) {
+  // core is typed as typeof ioc from globalThis
+  const candles = await core.candleDbService.findAll({
+    symbol: "BTCUSDT",
+    interval: "1h",
+  });
+
+  const signals = await core.cryptoYodaScreenService.screenDay(date);
+
+  core.loggerService.info("strategy run", {
+    candlesLen: candles.length,
+    signalsLen: signals.length,
+  });
+}
+```
+
+<Tip>
+When writing a new strategy, start by destructuring services you need from `core` at the top of the function body for cleaner code — TypeScript infers the full type from the global declaration automatically.
+</Tip>

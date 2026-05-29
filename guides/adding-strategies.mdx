@@ -1,0 +1,242 @@
+---
+title: "Add a New Trading Strategy Without Monorepo Changes"
+sidebarTitle: "Adding Strategies"
+description: "Drop a strategy directory under ./content/, wire its exchange and frame schemas, and let the CLI load it by path — no monorepo rebuild or DI changes needed."
+---
+
+Strategies are deliberately isolated from the monorepo's compiled packages. The `@backtest-kit/cli` runner loads a strategy file by path at startup, evaluates it, and discovers the schemas registered inside it — no bundling, no imports into `@pro/*`, and no DI wiring required on the monorepo side. Adding a new strategy is purely additive: create a directory, write two files, and pass the path to the CLI.
+
+## Directory structure
+
+Every strategy lives in its own directory under `./content/`:
+
+```
+./content/
+└── <my>.strategy/
+    ├── <my>.strategy.ts          ← strategy logic (signals, listeners)
+    └── modules/
+        └── backtest.module.ts    ← exchange schema, frame schema, config
+```
+
+The two files are independent of each other at the module level — the CLI loads the strategy file by path, and that file imports the module file if needed, or the module file can be auto-discovered. The naming convention (`<my>.strategy/`) is a readable label only; the CLI cares about the file path you pass as the positional argument.
+
+---
+
+## The strategy file
+
+The strategy file calls `addStrategySchema(...)` and attaches any number of `listenActivePing` and `listenError` handlers. It can call `core.*` services freely because `globalThis.core` is already initialised when the CLI evaluates it.
+
+### Required: `addStrategySchema`
+
+```typescript
+addStrategySchema({
+  strategyName: string,                           // unique name, referenced by the frame runner
+  getSignal: async (symbol, when, currentPrice) => ISignal,
+});
+```
+
+`getSignal` returns the initial position specification for the strategy. It runs once per new position opened on that symbol.
+
+### Optional: `listenActivePing`
+
+Registers a callback that fires on every candle tick while a position is active. Multiple `listenActivePing` calls stack — all registered handlers run in registration order.
+
+### Optional: `listenError`
+
+Registers a global error handler for uncaught errors during the backtest run.
+
+---
+
+## The module file
+
+The module file wires the exchange adapter and the replay time-window:
+
+| Call | Purpose |
+|---|---|
+| `addExchangeSchema(...)` | Registers candle fetcher, order-book fetcher, aggregated-trade fetcher, and price/quantity formatters |
+| `addFrameSchema(...)` | Sets the replay `interval`, `startDate`, and `endDate` |
+| `setConfig(...)` | Overrides engine config constants (stoploss distance, breakeven threshold, etc.) |
+
+---
+
+## The `apr_2026` strategy walkthrough
+
+The repository ships with a complete reference strategy at `./content/apr_2026.strategy/`. It implements a **dollar-cost-averaging ladder** that averages into a position on every tick where price has moved outside a proximity band, then closes the entire position once the aggregate PnL crosses a profit target.
+
+### Constants
+
+```typescript
+const HARD_STOP         = 25.0;   // % drawdown before forced stop-loss close
+const TARGET_PROFIT     = 3;      // % PnL required to close the position
+
+const LADDER_STEP_COST  = 100;    // USD spent per averaging buy
+const LADDER_UPPER_STEP = 5;      // % above last entry → inside overlap band
+const LADDER_LOWER_STEP = 1;      // % below last entry → inside overlap band
+const LADDER_MAX_STEPS  = 10;     // hard cap on the number of open ladder entries
+```
+
+### `addStrategySchema` — initial signal
+
+`Position.moonbag` constructs a long position with a hard stop-loss at `HARD_STOP` percent below the entry price. `minuteEstimatedTime: 50` tells the engine how long to hold the position open before re-evaluating:
+
+```typescript
+addStrategySchema({
+  strategyName: "apr_2026_strategy",
+  getSignal: async (symbol, when, currentPrice) => {
+    console.log(symbol, when.getTime());
+    return {
+      position: "long",
+      ...Position.moonbag({
+        position: "long",
+        currentPrice,
+        percentStopLoss: HARD_STOP,
+      }),
+      minuteEstimatedTime: 50,
+      cost: LADDER_STEP_COST,
+    };
+  },
+});
+```
+
+### First `listenActivePing` — ladder averaging
+
+On every active tick, the handler checks two guard conditions before adding a new ladder rung:
+
+1. **Step cap** — if the position already has `LADDER_MAX_STEPS` entries, skip.
+2. **Proximity guard** — if the current price is within `±LADDER_UPPER_STEP` / `LADDER_LOWER_STEP` percent of any existing entry price, skip (avoids buying into the same price band repeatedly).
+
+If both guards pass, `commitAverageBuy` places a new $100 buy:
+
+```typescript
+listenActivePing(async ({ symbol, currentPrice }) => {
+  const { length: steps } = await getPositionEntries(symbol);
+  if (steps >= LADDER_MAX_STEPS) {
+    return;
+  }
+  const hasOverlap = await getPositionEntryOverlap(symbol, currentPrice, {
+    upperPercent: LADDER_UPPER_STEP,
+    lowerPercent: LADDER_LOWER_STEP,
+  });
+  if (hasOverlap) {
+    return;
+  }
+  await commitAverageBuy(symbol, LADDER_STEP_COST);
+});
+```
+
+### Second `listenActivePing` — PnL close
+
+A separate handler checks the aggregate profit-and-loss. If the position has not yet reached `TARGET_PROFIT` percent, it returns early. Once the threshold is crossed, `commitClosePending` closes all open entries and writes a log note:
+
+```typescript
+listenActivePing(async ({ symbol, data, timestamp }) => {
+  console.log("active", symbol, timestamp);
+  const currentProfit = await getPositionPnlPercent(symbol);
+  if (currentProfit < TARGET_PROFIT) {
+    return;
+  }
+  Log.info("position closed due to the target pnl reached", { symbol, data });
+  await commitClosePending(symbol, {
+    id:   "unknown",
+    note: str.newline("# Позиция закрыта по target pnl"),
+  });
+});
+```
+
+### `listenError` — error logging
+
+```typescript
+listenError((error) => {
+  console.log(error);
+  Log.debug("error", {
+    error:   errorData(error),
+    message: getErrorMessage(error),
+  });
+});
+```
+
+### Module file — exchange + frame
+
+`backtest.module.ts` registers a Binance spot exchange adapter via `ccxt` and sets the replay window to the full month of April 2026 at 1-minute resolution:
+
+```typescript
+setConfig({
+  CC_MAX_STOPLOSS_DISTANCE_PERCENT: 100,
+  CC_BREAKEVEN_THRESHOLD: 0,
+});
+
+addExchangeSchema({
+  exchangeName: "ccxt-exchange",
+  getCandles: async (symbol, interval, since, limit) => { /* ... */ },
+  getOrderBook: async (symbol, depth, _from, _to, backtest) => { /* ... */ },
+  getAggregatedTrades: async (symbol, from, to) => { /* ... */ },
+  formatPrice: async (symbol, price) => { /* ... */ },
+  formatQuantity: async (symbol, quantity) => { /* ... */ },
+});
+
+addFrameSchema({
+  frameName:  "apr_2026_frame",
+  interval:   "1m",
+  startDate:  new Date("2026-04-01T00:00:00Z"),
+  endDate:    new Date("2026-04-27T00:00:00Z"),
+});
+```
+
+---
+
+## Running the strategy
+
+<Tabs>
+  <Tab title="Mode B — single symbol (recommended for development)">
+    Mode B skips the `--entry` gate in `backtest.ts` and hands control to the `@backtest-kit/cli` runner. It runs a single backtest for the symbol configured inside the strategy's module file.
+
+    ```bash
+    npm run start -- --backtest --ui --noCache \
+      ./content/apr_2026.strategy/apr_2026.strategy.ts
+    ```
+
+    Use `--noCache` during development so candles are fetched fresh on every run. Remove `--ui` to suppress the web dashboard on `:60050`.
+  </Tab>
+  <Tab title="Mode A — 9 symbols in parallel">
+    Mode A requires `--entry`. The `backtest.ts` entrypoint reads `CC_SYMBOL_LIST`, pre-warms candles into Mongo with `cacheCandles` (if `--cache` is passed), then calls `Backtest.background(symbol, ...)` for each symbol concurrently in the same Node process.
+
+    ```bash
+    npm run start -- --backtest --entry --ui --cache \
+      ./content/apr_2026.strategy/apr_2026.strategy.ts
+    ```
+
+    The `--cache` flag is required on the first run for each time window. Subsequent runs reuse the cached candles and the hot loop runs at ~6 300× real-time aggregate speed.
+  </Tab>
+</Tabs>
+
+<Tip>
+Always validate a new strategy with **Mode B** first. A single-symbol run is faster to iterate, easier to read in the UI, and exposes logic errors before you commit 9-symbol infrastructure resources to a broken strategy.
+</Tip>
+
+---
+
+## Checklist for a new strategy
+
+<Accordion title="Full checklist">
+
+**Directory**
+- [ ] `./content/<my>.strategy/` directory created
+- [ ] `./content/<my>.strategy/<my>.strategy.ts` exists
+- [ ] `./content/<my>.strategy/modules/backtest.module.ts` exists
+
+**Strategy file**
+- [ ] `addStrategySchema({ strategyName, getSignal })` is called
+- [ ] `getSignal` returns a valid signal object (position, stop-loss, cost)
+- [ ] At least one `listenActivePing` handler is registered
+- [ ] `listenError` is registered for debugging
+
+**Module file**
+- [ ] `addExchangeSchema(...)` is called with a unique `exchangeName`
+- [ ] `addFrameSchema(...)` is called with a unique `frameName`, `interval`, `startDate`, `endDate`
+- [ ] `setConfig(...)` is called if any engine defaults need overriding
+
+**Test run**
+- [ ] Mode B (single symbol, `--noCache`) runs to completion without errors
+- [ ] Mode A (`--entry --cache`) runs and produces output for all symbols
+
+</Accordion>

@@ -1,0 +1,181 @@
+---
+title: "Persistence Configuration: Adapters for Live and Backtest Modes"
+sidebarTitle: "Persistence Config"
+description: "Understand how config/setup.config.ts wires each backtest-kit subsystem to a Mongo, memory, or local-file adapter, and how to swap any one in a single line."
+---
+
+The file `config/setup.config.ts` is the single place in the monorepo that decides which storage adapter each `backtest-kit` subsystem uses. Live modes write to Mongo for durability; backtest replay modes use in-memory or local-file adapters so they never block on disk I/O during the hot loop. Switching any subsystem to a different adapter — including a custom one — is a one-line change in this file.
+
+## Full file listing
+
+```typescript
+// config/setup.config.ts
+import { setup } from "@backtest-kit/mongo";
+
+import {
+  Markdown,
+  StorageLive,
+  StorageBacktest,
+  NotificationLive,
+  NotificationBacktest,
+  RecentLive,
+  RecentBacktest,
+  Dump,
+  MemoryLive,
+  MemoryBacktest,
+  StateLive,
+  StateBacktest,
+  SessionLive,
+  SessionBacktest,
+  Log,
+} from "backtest-kit";
+
+{
+  Dump.useMarkdown();
+}
+
+{
+  SessionLive.usePersist();
+  SessionBacktest.useLocal();
+}
+
+{
+  StorageLive.usePersist();
+  StorageBacktest.useMemory();
+}
+
+{
+  RecentLive.usePersist();
+  RecentBacktest.useMemory();
+}
+
+{
+  NotificationLive.usePersist();
+  NotificationBacktest.useMemory();
+}
+
+{
+  RecentLive.usePersist();
+  RecentBacktest.useMemory();
+}
+
+{
+  MemoryLive.usePersist();
+  MemoryBacktest.useLocal();
+}
+
+{
+  StateLive.usePersist();
+  StateBacktest.useLocal();
+}
+
+{
+  Markdown.useDummy();
+  Log.useJsonl();
+}
+
+setup();
+```
+
+---
+
+## Adapter table
+
+Each subsystem has two sides: **Live** (used during `--live` and `--paper` runs) and **Backtest** (used during `--backtest` runs). The current configuration is:
+
+| Subsystem | Live adapter | Backtest adapter |
+|---|---|---|
+| Session | `SessionLive.usePersist()` — Mongo | `SessionBacktest.useLocal()` — local file |
+| Storage | `StorageLive.usePersist()` — Mongo | `StorageBacktest.useMemory()` — in-process RAM |
+| Recent | `RecentLive.usePersist()` — Mongo | `RecentBacktest.useMemory()` — in-process RAM |
+| Notification | `NotificationLive.usePersist()` — Mongo | `NotificationBacktest.useMemory()` — in-process RAM |
+| Memory | `MemoryLive.usePersist()` — Mongo | `MemoryBacktest.useLocal()` — local file |
+| State | `StateLive.usePersist()` — Mongo | `StateBacktest.useLocal()` — local file |
+| Markdown | `Markdown.useDummy()` — no-op | same no-op |
+| Log | `Log.useJsonl()` — JSONL file | same JSONL file |
+
+<Note>
+Replacing any adapter in the table above is one line: swap the method call on the right-hand side. For example, to persist backtest storage to Mongo instead of memory, change `StorageBacktest.useMemory()` to `StorageBacktest.usePersist()`. The adapter interface is identical regardless of the backing store.
+</Note>
+
+---
+
+## Why backtest uses memory and local file
+
+Backtest replay is CPU-bound, not I/O-bound. At ~6 300× real-time aggregate throughput, the hot loop executes `listenActivePing → getPositionEntries → commitAverageBuy` at ~103 events/second across 9 parallel symbols in a single Node process. Writing transient state to Mongo on every tick would serialize on the Mongo connection pool and reduce that throughput dramatically.
+
+<CardGroup cols={2}>
+  <Card title="Memory adapters" icon="bolt">
+    Subsystems like `Storage`, `Recent`, and `Notification` hold state that is only meaningful within a single replay run. Memory adapters eliminate all network round-trips for these, keeping the event loop hot.
+  </Card>
+  <Card title="Local-file adapters" icon="file">
+    `Session`, `Memory`, and `State` need to survive process restarts between debug sessions, so they write to local files. File I/O is still orders of magnitude faster than Mongo for the small, structured payloads these subsystems produce.
+  </Card>
+</CardGroup>
+
+Live mode inverts these priorities: positions, sessions, and state must survive infrastructure restarts and be readable by external tooling (dashboards, audit logs), so every subsystem writes to Mongo via the `usePersist()` adapter.
+
+---
+
+## `Dump.useMarkdown()`
+
+`Dump` controls how the engine serialises position summaries for human review. `useMarkdown()` is the only call currently active for `Dump`, but `Markdown.useDummy()` is set immediately after — so the Markdown renderer itself is a no-op in the current configuration.
+
+To enable rendered Markdown output, replace `Markdown.useDummy()` with an active Markdown adapter (e.g. `Markdown.useFile()` if such an adapter is available in your `backtest-kit` version, or a custom implementation). The `Dump.useMarkdown()` call will then route summaries through that renderer.
+
+---
+
+## `Log.useJsonl()`
+
+`Log` is the structured logging channel used by `Log.info(...)`, `Log.debug(...)`, and related calls throughout strategy files and services. `useJsonl()` writes one JSON object per line to a `.jsonl` file, which is easy to tail, grep, and ingest into log-aggregation tooling. This adapter is shared between live and backtest modes — all runs produce machine-readable logs in the same format.
+
+---
+
+## `setup()` — wiring the Mongo connection
+
+The `setup()` call at the bottom of the file is imported from `@backtest-kit/mongo`. It reads `CC_MONGO_CONNECTION_STRING` from the environment (default: `mongodb://localhost:27017/backtest-pro?wtimeoutMS=15000`) and establishes the Mongoose connection that backs all `usePersist()` adapters and the `@pro/core` DbServices.
+
+```bash
+# .env (or docker-compose environment block)
+CC_MONGO_CONNECTION_STRING=mongodb://localhost:27017/backtest-pro?wtimeoutMS=15000
+```
+
+<Warning>
+`setup()` must remain the last statement in `setup.config.ts`. All `usePersist()` adapter registrations must complete before the connection is opened, or the adapters will not be bound to the Mongoose instance that `setup()` creates.
+</Warning>
+
+---
+
+## How to re-point a subsystem
+
+<Steps>
+
+### Open `config/setup.config.ts`
+
+### Find the subsystem block you want to change
+
+Each subsystem has its own scoped `{ }` block. For example, to change how backtest sessions are stored:
+
+```typescript
+{
+  SessionLive.usePersist();
+  SessionBacktest.useLocal();   // ← this line
+}
+```
+
+### Replace the method call
+
+Change `useLocal()` to `useMemory()` or `usePersist()` (or a custom adapter method):
+
+```typescript
+{
+  SessionLive.usePersist();
+  SessionBacktest.useMemory();  // ← changed to memory
+}
+```
+
+### Save and restart
+
+No rebuild is needed — `setup.config.ts` is loaded at runtime by the loader config. Restart the process and the new adapter is active.
+
+</Steps>

@@ -1,20 +1,81 @@
 ---
-title: "Introduction"
-description: "Welcome to your project"
+title: "backtest-monorepo-parallel: 6300× Real-Time Crypto Backtesting"
+sidebarTitle: "Home"
+description: "TypeScript monorepo template for backtest-kit. Run 9 crypto symbols in parallel in one Node process with a zero-import DI runtime, MongoDB persistence, and Redis caching."
 ---
 
-Write a short description of your product here. What it does, who it's for, and what they can accomplish with it.
+backtest-monorepo-parallel is a production-ready TypeScript monorepo template that lets you backtest trading strategies across 9 crypto symbols simultaneously — achieving **~6 300× real-time aggregate replay speed** on commodity developer hardware. It wires together a zero-import dependency-injection runtime, MongoDB for durable persistence, and Redis for O(1) candle lookups, all in a single Node process with no IPC overhead.
 
-<Tip>
-  Ready to make this your own? Start by editing this page. Update your `docs.json` file to customize your site. Then fill out the [Quickstart](/quickstart) page.
-</Tip>
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Build the workspace, spin up infrastructure, and run your first parallel backtest in minutes.
+  </Card>
+  <Card title="Architecture" icon="diagram-project" href="/architecture">
+    Understand the monorepo layout, DI runtime, and how strategy files reach the IoC container without imports.
+  </Card>
+  <Card title="Mode A: Parallel Runner" icon="bolt" href="/guides/mode-a-parallel">
+    Run all 9 symbols concurrently with the `--entry` flag and cache candles for maximum throughput.
+  </Card>
+  <Card title="API Reference" icon="code" href="/api/ioc-container">
+    Explore BaseCRUD, BaseMap, strategy schemas, and the full IoC container surface.
+  </Card>
+</CardGroup>
 
-<Card title="Quickstart" icon="rocket" href="/quickstart">
-  This card links to the quickstart page in your project.
-</Card>
-<Card title="Components" icon="puzzle-piece" href="https://mintlify.com/docs/components">
-  Add cards, callouts, steps, tabs, and more to design and structure your pages.
-</Card>
-<Card title="Settings" icon="gear" href="https://mintlify.com/docs/organize/settings">
-  Set your site name, branding, and navigation in the `docs.json` file.
-</Card>
+## Why backtest-monorepo-parallel?
+
+Traditional backtesting frameworks fork a process per symbol or serialize symbols sequentially. This template takes a different approach: all `Backtest.background(...)` calls share one Node event loop, one MongoDB connection pool, and one Redis pool. The result is near-linear scaling with zero subprocess overhead.
+
+<CardGroup cols={3}>
+  <Card title="6300× Speed" icon="gauge-high">
+    Replays 9 symbols × 27 days of 1m candles in a few minutes of wall time on a laptop.
+  </Card>
+  <Card title="Zero-Import DI" icon="plug">
+    Strategy files access `globalThis.core` at evaluation time — no imports, no bundler hooks.
+  </Card>
+  <Card title="Atomic Writes" icon="database">
+    Every `write*Data()` is a single `findOneAndUpdate` with `upsert:true` — no application-side locks.
+  </Card>
+</CardGroup>
+
+## Getting started
+
+<Steps>
+  <Step title="Spin up infrastructure">
+    Start MongoDB and Redis with the bundled Docker Compose files.
+    ```bash
+    docker-compose -f docker/mongodb/docker-compose.yaml up -d
+    docker-compose -f docker/redis/docker-compose.yaml up -d
+    ```
+  </Step>
+  <Step title="Build workspace packages">
+    Compile `@pro/core` and `@pro/main` into CJS bundles and rolled-up type declarations.
+    ```bash
+    npm run build        # Linux / macOS
+    npm run build:win    # Windows
+    ```
+  </Step>
+  <Step title="Run a parallel backtest">
+    Launch all 9 symbols concurrently with candle pre-warming enabled.
+    ```bash
+    npm run start -- --backtest --entry --ui --cache \
+      ./content/apr_2026.strategy/apr_2026.strategy.ts
+    ```
+  </Step>
+  <Step title="Extend the monorepo">
+    Add new services, strategies, and Mongo collections following the [scaling patterns](/guides/adding-services).
+  </Step>
+</Steps>
+
+## Performance at a glance
+
+| Metric | Value |
+|---|---|
+| Aggregate replay speed | **~6 326× real-time** |
+| Event throughput | **~103 events/sec** (one Node process) |
+| Symbols in parallel | **9** (BTC, POL, ZEC, HYPE, XAUT, DOGE, SOL, PENGU, HBAR) |
+| Candle frame covered | `2026-04-01 → 2026-04-27` (38 880 candles/symbol × 9) |
+| Hardware | i5-13420H, 16 GB DDR4-3200, NVMe SSD |
+
+<Note>
+  These numbers were measured with a hot Mongo + Redis cache (candles pre-warmed via `--cache`). Cold-start times are dominated by the initial CCXT HTTP fetch, not the backtest engine itself.
+</Note>

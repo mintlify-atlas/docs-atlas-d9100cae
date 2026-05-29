@@ -1,0 +1,112 @@
+{
+  "projectType": "framework",
+  "projectName": "backtest-monorepo-parallel",
+  "projectDescription": "A TypeScript monorepo template for backtest-kit that runs crypto trading strategy backtests across 9 symbols in parallel within a single Node process, using a zero-import DI runtime, MongoDB for persistence, and Redis for O(1) candle lookups.",
+  "theme": "aspen",
+  "primaryColor": "#1A56DB",
+  "lightColor": "#E8F0FE",
+  "darkColor": "#0F2D6B",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "architecture"
+            ]
+          },
+          {
+            "group": "Infrastructure",
+            "pages": [
+              "infrastructure/mongodb",
+              "infrastructure/redis",
+              "infrastructure/environment"
+            ]
+          },
+          {
+            "group": "Running Backtests",
+            "pages": [
+              "guides/mode-a-parallel",
+              "guides/mode-b-single",
+              "guides/live-paper-trading"
+            ]
+          },
+          {
+            "group": "Extending the Monorepo",
+            "pages": [
+              "guides/adding-services",
+              "guides/adding-strategies",
+              "guides/persistence-configuration"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Core Package (@pro/core)",
+            "pages": [
+              "api/ioc-container",
+              "api/base-crud",
+              "api/base-map",
+              "api/services"
+            ]
+          },
+          {
+            "group": "Main Package (@pro/main)",
+            "pages": [
+              "api/cli-flags",
+              "api/entry-points"
+            ]
+          },
+          {
+            "group": "Strategy API",
+            "pages": [
+              "api/strategy-schema",
+              "api/exchange-schema",
+              "api/frame-schema"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "6300× real-time aggregate backtesting speed across 9 symbols in a single Node process",
+    "Zero-import DI runtime — strategy files access globalThis.core without any import statements",
+    "Atomic upserts via findOneAndUpdate with upsert:true — no read-modify-write cycles under concurrent symbol writes",
+    "Redis O(1) lookup cache via BaseMap with configurable TTL before falling back to MongoDB",
+    "Per-subsystem persistence adapter switching between Live (Mongo) and Backtest (memory/local file) modes",
+    "npm workspaces monorepo with Rollup builds producing CJS bundles and rolled-up .d.ts type files",
+    "Telegram Scraper + Parser pipeline for ingesting trading signals from channels",
+    "ccxt-based exchange integration with Binance spot market candle fetching and order book support",
+    "Ladder-averaging strategy pattern with configurable step cost, max steps, and PnL-based close triggers",
+    "Mode A (parallel, --entry flag) and Mode B (single-symbol CLI) run modes in the same binary"
+  ],
+  "publicApiSurface": [
+    "ioc — globalThis.core IoC container with all registered services",
+    "BaseCRUD(Model) — factory for Mongoose-backed CRUD: create, update, findById, findByFilter, findAll, iterate, paginate",
+    "BaseMap(connectionKey, ttlExpireSeconds) — Redis-backed map: get, set, delete, has, clear, toArray, iterate, keys, values, size",
+    "provide(symbol, factory) / inject<T>(symbol) / init() — DI primitives from di-kit via createActivator('pro')",
+    "LoggerService — log, debug, info, warn, setLogger",
+    "ScraperService.scrapeDay(channel, date) — fetch Telegram channel messages for a day",
+    "ParserService.parseDay(messages, format) — extract structured fields from raw messages via regex format",
+    "CryptoYodaScreenService.screenDay(date) / parseDay(scraperList) — combined scrape+parse for crypto_yoda_channel",
+    "CandleDbService.create(dto) / hasCandle(symbol, interval, timestamp) / findBySymbolIntervalTimestamp(...) — atomic candle upserts",
+    "addStrategySchema({ strategyName, getSignal }) — register a trading strategy",
+    "addExchangeSchema({ exchangeName, getCandles, getOrderBook, getAggregatedTrades, formatPrice, formatQuantity }) — register an exchange",
+    "addFrameSchema({ frameName, interval, startDate, endDate }) — register a backtest time frame",
+    "Backtest.background(symbol, { exchangeName, strategyName, frameName }) — start a background backtest for one symbol",
+    "Live.background(symbol, { exchangeName, strategyName }) — start a background live/paper trade for one symbol",
+    "listenActivePing(handler) — subscribe to per-tick backtest events",
+    "listenError(handler) — subscribe to strategy errors",
+    "cacheCandles({ exchangeName, from, to, interval, symbol }) — pre-warm candle cache into MongoDB",
+    "getArgs() — parse CLI flags: --entry, --backtest, --live, --paper, --session, --cache",
+    "CC_SYMBOL_LIST, CC_MONGO_CONNECTION_STRING, CC_REDIS_HOST, CC_REDIS_PORT, CC_REDIS_USER, CC_REDIS_PASSWORD — environment variables"
+  ]
+}

@@ -1,0 +1,253 @@
+---
+title: "Exchange Schema API: Candles, Orders, and Formatting"
+sidebarTitle: "Exchange Schema"
+description: "How to implement and register addExchangeSchema with getCandles, getOrderBook, getAggregatedTrades, formatPrice, and formatQuantity using ccxt or a custom adapter."
+---
+
+The exchange schema is the bridge between `backtest-kit`'s internal engine and the actual market data source. It is registered once at startup via `addExchangeSchema` and then resolved by name whenever `Backtest.background` or `Live.background` needs to fetch candles, format prices, or retrieve order book depth. The reference implementation in `content/apr_2026.strategy/modules/backtest.module.ts` uses `ccxt.binance` in spot mode with rate limiting enabled, but any data source that satisfies the interface will work.
+
+---
+
+## setConfig
+
+Before registering schemas, the module configures two engine-wide risk parameters via `setConfig`. These values affect how `backtest-kit` handles stop-loss distances and breakeven logic across all running symbols.
+
+```typescript
+setConfig({
+  CC_MAX_STOPLOSS_DISTANCE_PERCENT: 100,
+  CC_BREAKEVEN_THRESHOLD: 0,
+});
+```
+
+<ParamField path="CC_MAX_STOPLOSS_DISTANCE_PERCENT" type="number">
+  Maximum allowed distance between entry price and stop-loss as a percentage. Setting this to `100` disables the guard, allowing strategies like `apr_2026` to use a 25% hard stop without triggering an engine error.
+</ParamField>
+
+<ParamField path="CC_BREAKEVEN_THRESHOLD" type="number">
+  Percentage PnL at which the engine moves the stop-loss to breakeven. Setting this to `0` disables automatic breakeven adjustment, leaving stop management entirely to the strategy's `listenActivePing` handlers.
+</ParamField>
+
+---
+
+## addExchangeSchema
+
+Registers a named exchange adapter for use by the parallel runner.
+
+```typescript
+addExchangeSchema({
+  exchangeName: string;
+  getCandles: (symbol: string, interval: string, since: Date, limit: number) => Promise<Candle[]>;
+  getOrderBook: (symbol: string, depth: number, from: Date, to: Date, backtest: boolean) => Promise<OrderBook>;
+  getAggregatedTrades: (symbol: string, from: Date, to: Date) => Promise<AggTrade[]>;
+  formatPrice: (symbol: string, price: number) => Promise<string>;
+  formatQuantity: (symbol: string, quantity: number) => Promise<string>;
+})
+```
+
+### Parameters
+
+<ParamField path="exchangeName" type="string" required>
+  Unique identifier for this exchange adapter. Must match the `exchangeName` passed to `Backtest.background` or `Live.background`. In the reference module this is `"ccxt-exchange"`.
+</ParamField>
+
+<ParamField path="getCandles" type="function" required>
+  Fetches historical OHLCV candles for a symbol. Called by the backtest engine to populate the replay buffer.
+
+  <Expandable title="Parameters and return type">
+    <ParamField path="symbol" type="string">
+      Trading pair, e.g. `"BTCUSDT"`.
+    </ParamField>
+    <ParamField path="interval" type="string">
+      Candle interval string — must be one of the values in the frame schema (e.g. `"1m"`).
+    </ParamField>
+    <ParamField path="since" type="Date">
+      Fetch candles starting from this timestamp (inclusive).
+    </ParamField>
+    <ParamField path="limit" type="number">
+      Maximum number of candles to return per request.
+    </ParamField>
+    <ResponseField name="Candle[]" type="array">
+      Array of `{ timestamp: number, open: number, high: number, low: number, close: number, volume: number }`.
+    </ResponseField>
+  </Expandable>
+</ParamField>
+
+<ParamField path="getOrderBook" type="function" required>
+  Fetches the current order book. In live/paper mode this returns real depth data; in backtest mode the function receives `backtest: true` and the reference implementation deliberately throws.
+
+  <Expandable title="Parameters and return type">
+    <ParamField path="symbol" type="string">Trading pair.</ParamField>
+    <ParamField path="depth" type="number">Number of price levels to fetch on each side.</ParamField>
+    <ParamField path="from" type="Date">Start of the requested time range.</ParamField>
+    <ParamField path="to" type="Date">End of the requested time range.</ParamField>
+    <ParamField path="backtest" type="boolean">
+      `true` when called during backtest replay. Use this flag to guard against unsupported operations.
+    </ParamField>
+    <ResponseField name="OrderBook" type="object">
+      `{ symbol: string, asks: Array<{ price: string, quantity: string }>, bids: Array<{ price: string, quantity: string }> }`
+    </ResponseField>
+  </Expandable>
+</ParamField>
+
+<ParamField path="getAggregatedTrades" type="function" required>
+  Fetches aggregated trade records for a time window. Used for trade-level analysis and signal generation in strategies that need sub-candle granularity.
+
+  <Expandable title="Parameters and return type">
+    <ParamField path="symbol" type="string">Trading pair.</ParamField>
+    <ParamField path="from" type="Date">Start of the time window (inclusive).</ParamField>
+    <ParamField path="to" type="Date">End of the time window (inclusive).</ParamField>
+    <ResponseField name="AggTrade[]" type="array">
+      Array of `{ id: string, price: number, qty: number, timestamp: number, isBuyerMaker: boolean }`.
+    </ResponseField>
+  </Expandable>
+</ParamField>
+
+<ParamField path="formatPrice" type="function" required>
+  Rounds a raw price to the market's tick size. The reference implementation fetches the market object from ccxt and calls `roundTicks(price, tickSize)` from `backtest-kit`.
+
+  ```typescript
+  formatPrice: async (symbol, price) => {
+    const market = exchange.market(symbol);
+    const tickSize = market.limits?.price?.min || market.precision?.price;
+    if (tickSize !== undefined) {
+      return roundTicks(price, tickSize);
+    }
+    return exchange.priceToPrecision(symbol, price);
+  }
+  ```
+</ParamField>
+
+<ParamField path="formatQuantity" type="function" required>
+  Rounds a raw quantity to the market's step size. Falls back to ccxt's `amountToPrecision` when step size is unavailable.
+
+  ```typescript
+  formatQuantity: async (symbol, quantity) => {
+    const market = exchange.market(symbol);
+    const stepSize = market.limits?.amount?.min || market.precision?.amount;
+    if (stepSize !== undefined) {
+      return roundTicks(quantity, stepSize);
+    }
+    return exchange.amountToPrecision(symbol, quantity);
+  }
+  ```
+</ParamField>
+
+<Warning>
+  `getOrderBook` **throws** in backtest mode by design. The reference implementation raises `"Order book fetching is not supported in backtest mode for the default exchange schema. Please implement it according to your needs."` Do not call order-book APIs unconditionally in your strategy — always guard with a live/paper context check, or implement a historical order-book replay source if your strategy requires it.
+</Warning>
+
+---
+
+## addFrameSchema (brief)
+
+Frame schema registration lives alongside exchange schema registration in `modules/backtest.module.ts`. See the [Frame Schema](/api/frame-schema) page for the full reference. Briefly: `addFrameSchema({ frameName, interval, startDate, endDate })` defines the time window and candle interval used by `Backtest.background`.
+
+---
+
+## Full source: modules/backtest.module.ts
+
+```typescript
+// content/apr_2026.strategy/modules/backtest.module.ts
+import { addExchangeSchema, addFrameSchema, roundTicks, setConfig } from "backtest-kit";
+import { singleshot } from "functools-kit";
+import ccxt from "ccxt";
+
+setConfig({
+  CC_MAX_STOPLOSS_DISTANCE_PERCENT: 100,
+  CC_BREAKEVEN_THRESHOLD: 0,
+});
+
+const getExchange = singleshot(async () => {
+  const exchange = new ccxt.binance({
+    options: {
+      defaultType: "spot",
+      adjustForTimeDifference: true,
+      recvWindow: 60000,
+    },
+    enableRateLimit: true,
+  });
+  await exchange.loadMarkets();
+  return exchange;
+});
+
+addExchangeSchema({
+  exchangeName: "ccxt-exchange",
+  getCandles: async (symbol, interval, since, limit) => {
+    const exchange = await getExchange();
+    const candles = await exchange.fetchOHLCV(
+      symbol,
+      interval,
+      since.getTime(),
+      limit,
+    );
+    return candles.map(([timestamp, open, high, low, close, volume]) => ({
+      timestamp,
+      open,
+      high,
+      low,
+      close,
+      volume,
+    }));
+  },
+  getOrderBook: async (symbol, depth, _from, _to, backtest) => {
+    if (backtest) {
+      throw new Error(
+        "Order book fetching is not supported in backtest mode for the default exchange schema. Please implement it according to your needs.",
+      );
+    }
+    const exchange = await getExchange();
+    const bookData = await exchange.fetchOrderBook(symbol, depth);
+    return {
+      symbol,
+      asks: bookData.asks.map(([price, quantity]) => ({
+        price: String(price),
+        quantity: String(quantity),
+      })),
+      bids: bookData.bids.map(([price, quantity]) => ({
+        price: String(price),
+        quantity: String(quantity),
+      })),
+    };
+  },
+  getAggregatedTrades: async (symbol: string, from: Date, to: Date) => {
+    const exchange = await getExchange();
+    const response = await exchange.publicGetAggTrades({
+      symbol,
+      startTime: from.getTime(),
+      endTime: to.getTime(),
+    });
+    return response.map((t: any) => ({
+      id: String(t.a),
+      price: parseFloat(t.p),
+      qty: parseFloat(t.q),
+      timestamp: t.T,
+      isBuyerMaker: t.m,
+    }));
+  },
+  formatPrice: async (symbol, price) => {
+    const exchange = await getExchange();
+    const market = exchange.market(symbol);
+    const tickSize = market.limits?.price?.min || market.precision?.price;
+    if (tickSize !== undefined) {
+      return roundTicks(price, tickSize);
+    }
+    return exchange.priceToPrecision(symbol, price);
+  },
+  formatQuantity: async (symbol, quantity) => {
+    const exchange = await getExchange();
+    const market = exchange.market(symbol);
+    const stepSize = market.limits?.amount?.min || market.precision?.amount;
+    if (stepSize !== undefined) {
+      return roundTicks(quantity, stepSize);
+    }
+    return exchange.amountToPrecision(symbol, quantity);
+  },
+});
+
+addFrameSchema({
+  frameName: "apr_2026_frame",
+  interval: "1m",
+  startDate: new Date("2026-04-01T00:00:00Z"),
+  endDate: new Date("2026-04-27T00:00:00Z"),
+});
+```

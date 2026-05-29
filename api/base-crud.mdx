@@ -1,0 +1,230 @@
+---
+title: "BaseCRUD: Mongoose CRUD & Pagination Factory in @pro/core"
+sidebarTitle: "Base CRUD"
+description: "Learn how BaseCRUD wraps a Mongoose Model to provide create, update, find, iterate, and paginate methods — and how CandleDbService extends it with atomic upserts."
+---
+
+`BaseCRUD` is a `di-factory` factory function that accepts a Mongoose `Model<any>` and returns a class pre-loaded with a full set of CRUD operations, cursor-based iteration, and skip/limit pagination. Extending `BaseCRUD(YourModel)` is the standard pattern for building database services inside `@pro/core`; the factory wires in `LoggerService` automatically so every operation emits structured log lines without additional setup.
+
+## Constructor
+
+<ParamField path="TargetModel" type="Model<any>" required>
+  A Mongoose model instance. The class stores it as `this.TargetModel` and uses `TargetModel.modelName` in log messages for traceability.
+</ParamField>
+
+The class also injects `LoggerService` from the IoC container:
+
+```typescript
+readonly loggerService = inject<LoggerService>(TYPES.loggerService);
+```
+
+## Constants
+
+| Constant | Value | Description |
+|---|---|---|
+| `FIND_ALL_LIMIT` | `1_000` | Default maximum documents returned by `findAll` |
+
+<Note>
+`FIND_ALL_LIMIT = 1000` is a module-level constant. To return more documents in a single call, pass an explicit `limit` argument to `findAll()`. For unbounded iteration over very large collections, prefer the `iterate()` async generator instead.
+</Note>
+
+## Public methods
+
+### `create(dto)`
+
+Inserts a new document and returns the plain JavaScript representation via `readTransform(item.toJSON())`.
+
+<ParamField path="dto" type="object" required>
+  Plain data transfer object whose shape must match the Mongoose schema for `TargetModel`.
+</ParamField>
+
+**Returns:** `Promise<object>` — the created document after `readTransform` (MongoDB `_id` renamed to `id`, `__v` stripped).
+
+---
+
+### `update(id, dto)`
+
+Finds a document by its `_id`, applies the provided fields (omitting `id`), and returns the updated document.
+
+<ParamField path="id" type="string" required>
+  MongoDB document `_id` string.
+</ParamField>
+
+<ParamField path="dto" type="object" required>
+  Partial or full document fields to apply. The `id` key is automatically stripped before the update to prevent overwriting `_id`.
+</ParamField>
+
+**Returns:** `Promise<object>` — the updated document after `readTransform`.
+
+**Throws:** `Error` with message `"<ModelName> not found"` when no document with `id` exists.
+
+Uses `findByIdAndUpdate` with options `{ new: true, runValidators: true }`.
+
+---
+
+### `findById(id)`
+
+Fetches a single document by its `_id`.
+
+<ParamField path="id" type="string" required>
+  MongoDB document `_id` string.
+</ParamField>
+
+**Returns:** `Promise<object>` — the found document after `readTransform`.
+
+**Throws:** `Error` with message `"<ModelName> not found"` when no document exists.
+
+---
+
+### `findByFilter(filterData, sort?)`
+
+Finds the first document matching an arbitrary filter using `findOne`.
+
+<ParamField path="filterData" type="object" required>
+  Mongoose query filter object.
+</ParamField>
+
+<ParamField path="sort" type="object">
+  Optional Mongoose sort object, e.g. `{ date: -1 }`.
+</ParamField>
+
+**Returns:** `Promise<object | null>` — the matched document after `readTransform`, or `null` if no document matched.
+
+---
+
+### `findAll(filterData?, limit?)`
+
+Returns up to `limit` documents matching the filter, sorted by `date: -1` (most recent first).
+
+<ParamField path="filterData" type="object">
+  Optional Mongoose query filter. Defaults to `{}` (all documents).
+</ParamField>
+
+<ParamField path="limit" type="number">
+  Maximum number of documents to return. Defaults to `1000` (`FIND_ALL_LIMIT`).
+</ParamField>
+
+**Returns:** `Promise<object[]>` — array of documents after `readTransform`, sorted newest first.
+
+---
+
+### `iterate(filterData?, sort?)`
+
+An async generator that yields documents one at a time. Use this for memory-efficient processing of large collections where loading everything into an array is impractical.
+
+<ParamField path="filterData" type="object">
+  Optional Mongoose query filter. Defaults to `{}`.
+</ParamField>
+
+<ParamField path="sort" type="object">
+  Optional Mongoose sort object.
+</ParamField>
+
+**Yields:** `object` — each document after `readTransform`.
+
+```typescript
+for await (const candle of candleDbService.iterate({ symbol: "BTCUSDT" })) {
+  // process one candle at a time — no full array loaded into memory
+}
+```
+
+---
+
+### `paginate(filterData, pagination, sort?)`
+
+Returns a page of results alongside the total document count — suitable for building paginated API endpoints or UIs.
+
+<ParamField path="filterData" type="object" required>
+  Mongoose query filter applied to both the result set and `countDocuments`.
+</ParamField>
+
+<ParamField path="pagination" type="{ limit: number; offset: number }" required>
+  <Expandable title="pagination fields">
+    <ParamField path="limit" type="number" required>
+      Maximum number of documents to include in the page.
+    </ParamField>
+    <ParamField path="offset" type="number" required>
+      Number of documents to skip before starting the page (0-based).
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField path="sort" type="object">
+  Optional Mongoose sort object.
+</ParamField>
+
+**Returns:** `Promise<{ rows: object[]; total: number }>`
+
+<Expandable title="return shape">
+  <ResponseField name="rows" type="object[]">
+    The page of documents after `readTransform`.
+  </ResponseField>
+  <ResponseField name="total" type="number">
+    Total number of documents matching `filterData` (from `countDocuments`), ignoring pagination bounds.
+  </ResponseField>
+</Expandable>
+
+---
+
+## Extending BaseCRUD — example
+
+The pattern for creating a new database service is to extend the class returned by `BaseCRUD(YourModel)`. All CRUD methods are immediately available on the subclass; you only need to add domain-specific overrides.
+
+```typescript
+import BaseCRUD from "@pro/core/lib/common/BaseCRUD";
+import { MyModel, IMyDto, IMyRow } from "../schema/My.schema";
+import { readTransform } from "@pro/core/utils/readTransform";
+
+export class MyDbService extends BaseCRUD(MyModel) {
+  // Override create for idempotent upsert semantics
+  public create = async (dto: IMyDto): Promise<IMyRow> => {
+    const filter = { symbol: dto.symbol, timestamp: dto.timestamp };
+    const insertOnly = { value: dto.value };
+    const document = await MyModel.findOneAndUpdate(
+      filter,
+      { $setOnInsert: insertOnly },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+    return readTransform(document.toJSON()) as unknown as IMyRow;
+  };
+}
+
+export default MyDbService;
+```
+
+## CandleDbService — atomic upsert override
+
+`CandleDbService` is the primary concrete subclass. It overrides `create` to make candle insertion **idempotent**: the `$setOnInsert` operator only writes fields when the document is newly created, meaning re-inserting the same `(symbol, interval, timestamp)` triplet is a no-op rather than an error.
+
+```typescript
+// packages/core/src/lib/services/db/CandleDbService.ts
+export class CandleDbService extends BaseCRUD(CandleModel) {
+  readonly loggerService = inject<LoggerService>(TYPES.loggerService);
+
+  public create = async (dto: ICandleDto): Promise<ICandleRow> => {
+    const filter = {
+      symbol: dto.symbol,
+      interval: dto.interval,
+      timestamp: dto.timestamp,
+    };
+    const insertOnly = {
+      exchangeName: EXCHANGE_NAME,
+      open: dto.open,
+      high: dto.high,
+      low: dto.low,
+      close: dto.close,
+      volume: dto.volume,
+    };
+    const document = await CandleModel.findOneAndUpdate(
+      filter,
+      { $setOnInsert: insertOnly },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+    return readTransform(document.toJSON()) as unknown as ICandleRow;
+  };
+}
+```
+
+<Note>
+The `(symbol, interval, timestamp)` compound index on `CandleSchema` is marked `unique: true`. The `$setOnInsert` upsert relies on this — if the document already exists the update becomes a safe no-op, making the method safe to call multiple times with the same candle data during backfill jobs.
+</Note>

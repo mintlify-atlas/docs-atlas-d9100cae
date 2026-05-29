@@ -1,0 +1,196 @@
+---
+title: "Deploy Strategies to Live and Paper Trading Modes"
+sidebarTitle: "Live & Paper"
+description: "Configure the --live and --paper entry flags to run strategies against real or simulated exchange data, and authenticate the Telegram scraper with the --session QR flow."
+---
+
+Once a strategy is validated in backtest, the same strategy file can be promoted to paper trading for real-time simulation or to live trading for actual exchange execution — without changing a single line of strategy logic. Both modes share the same `--entry` gate pattern as Mode A and iterate the same `CC_SYMBOL_LIST`, but they swap in Mongo-backed persistence adapters and connect to live exchange feeds instead of replaying cached candles.
+
+<Warning>
+  Live mode connects to a real exchange and can place real orders. Always validate a strategy with `--paper` first and confirm signal behaviour matches your backtest results before switching to `--live`.
+</Warning>
+
+## Commands
+
+<Tabs>
+  <Tab title="Paper trading">
+    ```bash
+    npm run start -- --paper --entry ./content/apr_2026.strategy/apr_2026.strategy.ts
+    ```
+  </Tab>
+  <Tab title="Live trading">
+    ```bash
+    npm run start -- --live --entry ./content/apr_2026.strategy/apr_2026.strategy.ts
+    ```
+  </Tab>
+</Tabs>
+
+## How each mode works
+
+Both `live.ts` and `paper.ts` share the same structure. The only difference is the mode flag they check (`--live` vs `--paper`). When the matching flag is present alongside `--entry`, the file calls `Live.background(symbol, ...)` for each symbol in `CC_SYMBOL_LIST`:
+
+<CodeGroup>
+```typescript live.ts
+import { CC_SYMBOL_LIST } from "../config/params";
+import { getArgs } from "../helpers/getArgs";
+import { listExchangeSchema, listStrategySchema, Live, waitForReady } from "backtest-kit";
+
+const main = async () => {
+  const { values } = getArgs();
+
+  if (!values.entry) {
+    return;
+  }
+
+  if (!values.live) {
+    return;
+  }
+
+  await waitForReady(false);
+
+  const [strategySchema] = await listStrategySchema();
+  const [exchangeSchema] = await listExchangeSchema();
+
+  for (const symbol of CC_SYMBOL_LIST) {
+    Live.background(symbol, {
+      exchangeName: exchangeSchema.exchangeName,
+      strategyName: strategySchema.strategyName,
+    });
+  }
+};
+
+main();
+```
+```typescript paper.ts
+import { CC_SYMBOL_LIST } from "../config/params";
+import { getArgs } from "../helpers/getArgs";
+import { listExchangeSchema, listStrategySchema, Live, waitForReady } from "backtest-kit";
+
+const main = async () => {
+  const { values } = getArgs();
+
+  if (!values.entry) {
+    return;
+  }
+
+  if (!values.paper) {
+    return;
+  }
+
+  await waitForReady(false);
+
+  const [strategySchema] = await listStrategySchema();
+  const [exchangeSchema] = await listExchangeSchema();
+
+  for (const symbol of CC_SYMBOL_LIST) {
+    Live.background(symbol, {
+      exchangeName: exchangeSchema.exchangeName,
+      strategyName: strategySchema.strategyName,
+    });
+  }
+};
+
+main();
+```
+</CodeGroup>
+
+Notice that neither mode accepts a `frameName`. Live and paper trading consume real-time candles from the exchange rather than replaying a historical window, so there is no frame schema to resolve.
+
+## Persistence differences vs backtest
+
+Backtest mode uses in-memory or local-file adapters for maximum replay speed. Live and paper modes switch all six transient subsystems to Mongo-backed `Persist` adapters so that state survives process restarts and is queryable after the fact. This is configured once in `config/setup.config.ts`:
+
+```typescript
+SessionLive.usePersist();    SessionBacktest.useLocal();
+StorageLive.usePersist();    StorageBacktest.useMemory();
+RecentLive.usePersist();     RecentBacktest.useMemory();
+NotificationLive.usePersist(); NotificationBacktest.useMemory();
+MemoryLive.usePersist();     MemoryBacktest.useLocal();
+StateLive.usePersist();      StateBacktest.useLocal();
+```
+
+The full adapter matrix:
+
+| Subsystem | Live / Paper | Backtest |
+|---|---|---|
+| Session | Persist (Mongo) | Local file |
+| Storage | Persist (Mongo) | Memory |
+| Recent | Persist (Mongo) | Memory |
+| Notification | Persist (Mongo) | Memory |
+| Memory | Persist (Mongo) | Local file |
+| State | Persist (Mongo) | Local file |
+| Markdown | Dummy (no-op) | Dummy |
+| Log | JSONL | JSONL |
+
+Re-pointing any subsystem to a custom adapter is one line in `config/setup.config.ts`.
+
+## Telegram session authentication
+
+Strategies that use `ScraperService` to ingest Telegram signals require a valid MTProto session before the strategy is started. The `--session` flag triggers `packages/main/src/main/session.ts`, which opens a QR code in your terminal and saves the resulting session string to `./session.txt`.
+
+<Note>
+  The `--session` step is a **prerequisite**, not part of the normal start command. Run it once ahead of your first live or paper deployment if your strategy consumes `ScraperService`. The saved `./session.txt` is reused on all subsequent starts.
+</Note>
+
+### Authenticating
+
+<Steps>
+  <Step title="Run the session command">
+    ```bash
+    npm run start -- --session
+    ```
+  </Step>
+  <Step title="Scan the QR code">
+    The terminal clears and prints a QR code alongside the instruction:
+
+    ```
+    Scan this QR code in Telegram app (Settings -> Devices -> Link Desktop Device):
+    ```
+
+    Open Telegram on your phone, go to **Settings → Devices → Link Desktop Device**, and point your camera at the QR.
+  </Step>
+  <Step title="Enter your 2FA password (if enabled)">
+    If your Telegram account has two-factor authentication enabled, the terminal prompts:
+
+    ```
+    Enter your 2FA password:
+    ```
+
+    Type your password and press Enter.
+  </Step>
+  <Step title="Confirm the saved session">
+    On success the terminal prints:
+
+    ```
+    Connected!
+    Session saved to ./session.txt
+    ```
+
+    The session string in `./session.txt` is loaded automatically by the strategy's `ScraperService` on the next start. No further action is required unless the session expires or is revoked.
+  </Step>
+</Steps>
+
+The session flow uses the `telegram` (GramJS) package with MTProto via QR login:
+
+```typescript
+await client.signInUserWithQrCode(
+  { apiId: CC_TELEGRAM_API_ID, apiHash: CC_TELEGRAM_API_HASH },
+  {
+    qrCode: async ({ token }) => {
+      const url = `tg://login?token=${token.toString("base64url")}`;
+      console.clear();
+      qrcodeTerminal.generate(url, { small: true });
+    },
+    password: async () =>
+      new Promise((resolve) =>
+        rl.question("Enter your 2FA password: ", resolve)
+      ),
+    onError: async (err) => {
+      console.error(err.message);
+      return false;
+    },
+  }
+);
+```
+
+`CC_TELEGRAM_API_ID` and `CC_TELEGRAM_API_HASH` are read from environment variables (with development fallbacks in `packages/main/src/config/params.ts`). Set these in your `.env` before running `--session` in production.

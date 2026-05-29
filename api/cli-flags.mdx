@@ -1,0 +1,124 @@
+---
+title: "CLI Flags Reference for @pro/main Entry Points"
+sidebarTitle: "CLI Flags"
+description: "Every boolean flag parsed by getArgs(), the positional strategy-file argument, and the environment variables that control parallel-mode symbol lists and Telegram auth."
+---
+
+The `@pro/main` package reads all runtime configuration from a single call to `getArgs()`, which wraps Node's built-in `parseArgs` utility with `strict: false` and `allowPositionals: true`. Every flag is a plain boolean that defaults to `false`; flags are not mutually exclusive and are routinely combined in a single command. The positional argument — a path to a `.strategy.ts` file — tells the CLI loader which strategy module to execute before the entry-point gates are evaluated.
+
+## Mode flags
+
+These flags gate execution inside `packages/main/src/main/backtest.ts`, `live.ts`, and `paper.ts`. Each module checks for both its own flag **and** `--entry`; omitting either causes an early return.
+
+<ParamField path="--backtest" type="boolean" default="false">
+  Activates backtest mode. Routes execution to `packages/main/src/main/backtest.ts`, which calls `Backtest.background(symbol, …)` for every symbol in `CC_SYMBOL_LIST`. Requires `--entry` for the parallel (Mode A) path; without `--entry`, the bundled `@backtest-kit/cli` runner handles the file instead (Mode B, single-symbol).
+</ParamField>
+
+<ParamField path="--live" type="boolean" default="false">
+  Activates live trading mode. Routes execution to `packages/main/src/main/live.ts`, which calls `Live.background(symbol, …)` for every symbol in `CC_SYMBOL_LIST`. Requires `--entry`.
+</ParamField>
+
+<ParamField path="--paper" type="boolean" default="false">
+  Activates paper trading mode. Routes execution to `packages/main/src/main/paper.ts`. Structurally identical to live mode — the same `Live.background` call is used — but paper mode does not send real orders. Requires `--entry`.
+</ParamField>
+
+<ParamField path="--session" type="boolean" default="false">
+  Activates Telegram QR-code session auth. Routes execution to `packages/main/src/main/session.ts`. **Does not require `--entry`** — the session module checks only its own flag and runs unconditionally when set. Saves the resulting session string to `./session.txt`.
+</ParamField>
+
+## Parallel-runner flag
+
+<ParamField path="--entry" type="boolean" default="false">
+  Enables the parallel runner gate inside `backtest.ts`, `live.ts`, and `paper.ts`. When present, each module proceeds to load schemas, iterate `CC_SYMBOL_LIST`, and call `*.background(symbol, …)` for every symbol concurrently in the same Node process. When absent, the module's `main()` function returns immediately and the `@backtest-kit/cli` runner (Mode B) takes over.
+</ParamField>
+
+<Note>
+  `--entry` is **required** for Mode A (parallel, multi-symbol) and has **no effect** in Mode B. In Mode B, the `@backtest-kit/cli` package reads the strategy file directly and drives a single-symbol backtest without consulting `packages/main/src/main/backtest.ts` at all.
+</Note>
+
+## Cache and UI flags
+
+<ParamField path="--cache" type="boolean" default="false">
+  Pre-warms candles for every symbol in `CC_SYMBOL_LIST` into MongoDB before starting the parallel runners. Calls `cacheCandles({ exchangeName, from, to, interval: '1m', symbol })` for each symbol using the registered frame's `startDate` / `endDate`. Ignored when `--entry` is not set.
+</ParamField>
+
+<ParamField path="--ui" type="boolean" default="false">
+  Starts the `@backtest-kit/ui` web interface on port **60050**. Passed through to `@backtest-kit/cli`; the dashboard shows live equity curves, open positions, and log streams for all running symbols.
+</ParamField>
+
+<ParamField path="--noCache" type="boolean" default="false">
+  Explicitly disables candle caching even when the environment would otherwise attempt it. Passed through to `@backtest-kit/cli`. Useful in Mode B when you want to force a fresh fetch from the exchange on every run.
+</ParamField>
+
+## Positional argument
+
+<ParamField path="[strategyFile]" type="string">
+  Path to the strategy entry file, passed as the first positional argument. The `@backtest-kit/cli` loader evaluates this file at startup, which registers strategy, exchange, and frame schemas via `addStrategySchema`, `addExchangeSchema`, and `addFrameSchema` before any entry-point gate runs.
+
+  ```bash
+  # Example
+  ./content/apr_2026.strategy/apr_2026.strategy.ts
+  ```
+</ParamField>
+
+## Environment variables
+
+These are declared in `packages/main/src/config/params.ts` and consumed throughout the entry-point modules.
+
+<ParamField path="CC_SYMBOL_LIST" type="string">
+  Comma-separated list of trading-pair symbols iterated by the parallel runner.
+
+  **Default:** `BTCUSDT,POLUSDT,ZECUSDT,HYPEUSDT,XAUTUSDT,DOGEUSDT,SOLUSDT,PENGUUSDT,HBARUSDT`
+
+  ```bash
+  CC_SYMBOL_LIST=BTCUSDT,ETHUSDT npm run start -- --backtest --entry \
+    ./content/apr_2026.strategy/apr_2026.strategy.ts
+  ```
+</ParamField>
+
+<ParamField path="CC_TELEGRAM_API_ID" type="number">
+  Telegram MTProto application ID. Used exclusively by `session.ts` when `--session` is set.
+
+  **Default:** `31861455` (development placeholder — replace with your own from [my.telegram.org](https://my.telegram.org))
+</ParamField>
+
+<ParamField path="CC_TELEGRAM_API_HASH" type="string">
+  Telegram MTProto application hash. Used exclusively by `session.ts` when `--session` is set.
+
+  **Default:** `ca60446c67ce250ee4e789c730163449` (development placeholder — replace with your own)
+</ParamField>
+
+## Example command combinations
+
+<Tip>
+  Flags compose freely. You can combine `--backtest --entry --ui --cache` in a single invocation; each flag is evaluated independently by the module that cares about it.
+</Tip>
+
+<CodeGroup>
+
+```bash Mode A — parallel backtest with UI and cache
+npm run start -- --backtest --entry --ui --cache \
+  ./content/apr_2026.strategy/apr_2026.strategy.ts
+```
+
+```bash Mode B — single-symbol backtest (no --entry)
+npm run start -- --backtest --ui --noCache \
+  ./content/apr_2026.strategy/apr_2026.strategy.ts
+```
+
+```bash Live parallel trading
+npm run start -- --live --entry --ui \
+  ./content/apr_2026.strategy/apr_2026.strategy.ts
+```
+
+```bash Paper parallel trading
+npm run start -- --paper --entry --ui \
+  ./content/apr_2026.strategy/apr_2026.strategy.ts
+```
+
+```bash Telegram session auth
+npm run start -- --session \
+  ./content/apr_2026.strategy/apr_2026.strategy.ts
+```
+
+</CodeGroup>

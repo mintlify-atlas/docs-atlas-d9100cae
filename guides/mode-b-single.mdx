@@ -1,0 +1,123 @@
+---
+title: "Test One Symbol at a Time With Mode B"
+sidebarTitle: "Mode B: Single"
+description: "Understand how omitting --entry hands control to @backtest-kit/cli for a single-symbol backtest, making Mode B ideal for strategy development and focused debugging."
+---
+
+Mode B is the focused development path. When you run a backtest **without** the `--entry` flag, `packages/main/src/main/backtest.ts` detects the missing flag and early-returns immediately. Control passes entirely to `@backtest-kit/cli`, which loads the strategy file you provide as a path argument, calls the `addStrategySchema`, `addExchangeSchema`, and `addFrameSchema` functions registered inside it, and runs a single-symbol backtest based on whatever the strategy file dispatches. There is no parallel runner, no `CC_SYMBOL_LIST` iteration, and no cross-symbol coordination — just one strategy against one symbol at a time.
+
+## The exact command
+
+```bash
+npm run start -- --backtest --ui --noCache ./content/apr_2026.strategy/apr_2026.strategy.ts
+```
+
+## Flag breakdown
+
+| Flag | Type | Effect |
+|---|---|---|
+| `--backtest` | boolean | Activates backtest mode globally |
+| `--ui` | boolean | Starts the `@backtest-kit/ui` web dashboard on port **60050** |
+| `--noCache` | boolean | Skips candle pre-warming; the CLI fetches candles on demand as the replay advances |
+| *(no `--entry`)* | — | `backtest.ts` early-returns; `@backtest-kit/cli` takes over as the sole runner |
+
+## How the CLI runner works
+
+<Steps>
+  <Step title="Load the strategy file by path">
+    `@backtest-kit/cli` receives the positional argument (`./content/apr_2026.strategy/apr_2026.strategy.ts`) and evaluates it at runtime. The file's top-level code runs immediately, registering all schemas with the engine.
+
+    The `apr_2026.strategy.ts` file registers the core strategy logic:
+
+    ```typescript
+    addStrategySchema({
+      strategyName: "apr_2026_strategy",
+      getSignal: async (symbol, when, currentPrice) => {
+        return {
+          position: "long",
+          ...Position.moonbag({
+            position: "long",
+            currentPrice,
+            percentStopLoss: HARD_STOP,
+          }),
+          minuteEstimatedTime: 50,
+          cost: LADDER_STEP_COST,
+        };
+      },
+    });
+    ```
+
+    Its companion `backtest.module.ts` registers the exchange and frame:
+
+    ```typescript
+    addFrameSchema({
+      frameName: "apr_2026_frame",
+      interval: "1m",
+      startDate: new Date("2026-04-01T00:00:00Z"),
+      endDate: new Date("2026-04-27T00:00:00Z"),
+    });
+    ```
+  </Step>
+  <Step title="Resolve schemas">
+    The CLI calls `listStrategySchema()`, `listExchangeSchema()`, and `listFrameSchema()` to retrieve the registered schemas. If any are missing, the run fails with a clear error message before any replay begins.
+  </Step>
+  <Step title="Run a single-symbol backtest">
+    The CLI starts a backtest for the symbol configured inside the strategy file, replaying candles from `startDate` to `endDate` at a 1-minute interval. Only one symbol context is active at a time — there is no concurrency overhead.
+  </Step>
+</Steps>
+
+## When to use Mode B
+
+<CardGroup cols={2}>
+  <Card title="Developing a new strategy" icon="code">
+    Mode B gives you a tight feedback loop. Edit the strategy file, rerun the command, and see results without waiting for 8 other symbols to finish.
+  </Card>
+  <Card title="Debugging a specific symbol" icon="bug">
+    When a signal misfires on a single pair, Mode B lets you focus log output and UI state on exactly that symbol without noise from the rest of the list.
+  </Card>
+  <Card title="Low-infrastructure environments" icon="server">
+    Running 9 parallel contexts multiplies Mongo write pressure and Redis round-trips. Mode B is far lighter and works fine on machines with constrained resources.
+  </Card>
+  <Card title="Validating a frame change" icon="calendar">
+    When you update `startDate` or `endDate` in `addFrameSchema`, Mode B confirms the new window is sane before you commit to a full multi-symbol cache pre-warm with `--cache`.
+  </Card>
+</CardGroup>
+
+<Tip>
+  Build and validate your strategy in Mode B first. Once `listenActivePing` produces the signal pattern you expect for a single symbol, scale up to Mode A with `--entry --cache` to verify the same logic holds across all 9 symbols simultaneously.
+</Tip>
+
+## Mode A vs Mode B comparison
+
+| Aspect | Mode A (parallel) | Mode B (single) |
+|---|---|---|
+| `--entry` flag | Required | Must be omitted |
+| `--cache` flag | Recommended on first run | Not needed (`--noCache` typical) |
+| Runner | `packages/main/src/main/backtest.ts` | `@backtest-kit/cli` built-in runner |
+| Symbols | All in `CC_SYMBOL_LIST` (default: 9) | One, as dispatched by the strategy file |
+| Concurrency | 9 contexts, single Node process | 1 context |
+| Mongo / Redis pressure | High (9 concurrent writers) | Low (1 writer) |
+| Best for | Measuring aggregate performance, regression testing | Strategy authoring, focused debugging, CI |
+| Measured replay speed | **≈ 6 326×** real-time (aggregate) | Single-symbol fraction of Mode A throughput |
+
+## The early-return gate
+
+The mechanism that switches between modes is a simple guard at the top of `backtest.ts`. Because `--entry` is `false` by default, omitting it is all that is needed to hand control to `@backtest-kit/cli`:
+
+```typescript
+const main = async () => {
+  const { values } = getArgs();
+
+  if (!values.entry) {
+    return;          // Mode B: nothing to do here, CLI takes over
+  }
+
+  if (!values.backtest) {
+    return;
+  }
+
+  // … Mode A parallel runner continues below
+};
+```
+
+This means the two modes are **mutually exclusive by design** — there is no runtime toggle, no environment variable to flip mid-run, and no shared mutable state between them.

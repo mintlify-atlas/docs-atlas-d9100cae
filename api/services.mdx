@@ -1,0 +1,453 @@
+---
+title: "Core Services Reference: Logger, Scraper, Parser & Candle DB"
+sidebarTitle: "Core Services"
+description: "Full API reference for the four services registered in @pro/core: LoggerService, ScraperService, ParserService, CandleDbService, and CryptoYodaScreenService."
+---
+
+`@pro/core` registers five services in its IoC container. Each is a lazy singleton resolved via `inject<T>(TYPES.token)` and accessible as a property on the `core` global in any strategy file. This page covers the public API of every service, their configuration requirements, and real usage examples drawn directly from the source.
+
+---
+
+## LoggerService
+
+`LoggerService` is the central logging abstraction for all packages in the monorepo. Out of the box it is a no-op — no output is produced until a real logger is installed via `setLogger`. This design keeps test and CI environments silent by default while allowing applications to plug in any compatible logging library.
+
+**Accessed via:** `core.loggerService` or `inject<LoggerService>(TYPES.loggerService)`
+
+### ILogger interface
+
+Every method receives a `topic` string first, followed by optional structured data arguments:
+
+```typescript
+interface ILogger {
+  log(topic: string, ...args: any[]): void;
+  debug(topic: string, ...args: any[]): void;
+  info(topic: string, ...args: any[]): void;
+  warn(topic: string, ...args: any[]): void;
+}
+```
+
+### NOOP_LOGGER
+
+The default internal logger is `NOOP_LOGGER` — all four methods call `void 0` and return immediately. This is replaced when `setLogger` is called.
+
+```typescript
+const NOOP_LOGGER: ILogger = {
+  log()  { void 0; },
+  debug(){ void 0; },
+  info() { void 0; },
+  warn() { void 0; },
+};
+```
+
+### Methods
+
+<Accordion title="log(topic, ...args)">
+  <ParamField path="topic" type="string" required>
+    Short descriptive label for the log entry, e.g. `"candleDbService create"`.
+  </ParamField>
+  <ParamField path="args" type="any[]">
+    Optional structured payload objects appended after the topic.
+  </ParamField>
+  **Returns:** `Promise<void>` — delegates to `_commonLogger.log`.
+</Accordion>
+
+<Accordion title="debug(topic, ...args)">
+  <ParamField path="topic" type="string" required>
+    Short descriptive label.
+  </ParamField>
+  <ParamField path="args" type="any[]">
+    Optional structured payload.
+  </ParamField>
+  **Returns:** `Promise<void>`
+</Accordion>
+
+<Accordion title="info(topic, ...args)">
+  <ParamField path="topic" type="string" required>
+    Short descriptive label.
+  </ParamField>
+  <ParamField path="args" type="any[]">
+    Optional structured payload.
+  </ParamField>
+  **Returns:** `Promise<void>`
+</Accordion>
+
+<Accordion title="warn(topic, ...args)">
+  <ParamField path="topic" type="string" required>
+    Short descriptive label.
+  </ParamField>
+  <ParamField path="args" type="any[]">
+    Optional structured payload.
+  </ParamField>
+  **Returns:** `Promise<void>`
+</Accordion>
+
+<Accordion title="setLogger(logger)">
+  Replaces the internal `_commonLogger` with a custom implementation. Call this once at application startup, before any service that uses logging is invoked.
+  <ParamField path="logger" type="ILogger" required>
+    Any object satisfying the `ILogger` interface.
+  </ParamField>
+  **Returns:** `void`
+</Accordion>
+
+### Usage example
+
+```typescript
+import { core } from "@pro/core";
+
+// Wire in a real logger at startup
+core.loggerService.setLogger(console);
+
+// All subsequent calls from any service will now use console
+core.loggerService.info("app started", { env: process.env.NODE_ENV });
+```
+
+---
+
+## ScraperService
+
+`ScraperService` retrieves raw Telegram messages from a public or private channel for a specific calendar day. It uses a singleton MTProto client created by `getTelegram()` — a `singleshot` wrapper around `TelegramClient` from the `telegram` library. The client reads its session string from `./session.txt` on first call.
+
+**Accessed via:** `core.scraperService` or `inject<ScraperService>(TYPES.scraperService)`
+
+<Note>
+Before `ScraperService` can be used, you must have generated a `session.txt` file by running the application once with the `--auth` flag: `npm start -- --auth`. Without this file, `getTelegram()` will throw and prevent the service from initialising.
+</Note>
+
+### ScraperMessage model
+
+```typescript
+export interface ScraperMessage {
+  id: number;       // Telegram message ID
+  channel: string;  // Channel username or ID passed to scrapeDay
+  content: string;  // Raw text body of the message
+  date: Date;       // UTC timestamp of the message
+}
+```
+
+### Methods
+
+#### `scrapeDay(channel, date)`
+
+Iterates Telegram messages for `channel` within the UTC day boundaries of `date` and returns all messages that contain a non-empty text body.
+
+<ParamField path="channel" type="string" required>
+  Telegram channel username (e.g. `"crypto_yoda_channel"`) or numeric channel ID.
+</ParamField>
+
+<ParamField path="date" type="Date" required>
+  Any `Date` whose UTC date component defines the day to scrape. Time components are discarded — the method always scans `00:00:00.000` to `23:59:59.999` UTC.
+</ParamField>
+
+**Returns:** `Promise<ScraperMessage[]>` — messages in reverse chronological order (newest first) as returned by `client.iterMessages`.
+
+Internally, the method:
+1. Sets `dayStart` = `date` with UTC hours reset to `00:00:00.000`
+2. Sets `dayEnd` = `date` with UTC hours set to `23:59:59.999`
+3. Calls `client.iterMessages(channel, { offsetDate: Math.floor(dayEnd / 1000) + 1 })`
+4. Skips messages without a text body (`message.message` falsy)
+5. Breaks iteration once a message timestamp falls before `dayStart`
+
+```typescript
+const messages = await core.scraperService.scrapeDay(
+  "crypto_yoda_channel",
+  new Date("2024-03-15")
+);
+// messages: ScraperMessage[] for the full UTC day 2024-03-15
+```
+
+---
+
+## ParserService
+
+`ParserService` applies a declarative field-extraction format to an array of `ScraperMessage` objects. Each message is tested against the format's regex patterns; successfully extracted fields are attached as `data`, while messages that fail a required pattern receive `data: null`.
+
+**Accessed via:** `core.parserService` or `inject<ParserService>(TYPES.parserService)`
+
+### Type system
+
+#### `ExtractConfig<T>`
+
+Describes how to extract a single typed field from raw message text:
+
+```typescript
+export type ExtractConfig<T = string> = {
+  pattern: RegExp;                                        // regex to match
+  group?: number;                                         // capture group index (default: 1)
+  transform?: (raw: string, match: RegExpMatchArray) => T; // coerce string to T
+  validate?: (value: T) => boolean;                       // reject bad values
+  multi?: boolean;                                        // use matchAll, return T[]
+  optional?: boolean;                                     // skip field if no match (don't null the message)
+};
+```
+
+#### `FieldMapping`
+
+A plain object mapping field names to `RegExp | ExtractConfig<any>`:
+
+```typescript
+export type FieldMapping = {
+  [key: string]: RegExp | ExtractConfig<any>;
+};
+```
+
+#### `ExtractedData<M>`
+
+Derives the output type from a `FieldMapping` — multi fields become arrays, transform return types flow through correctly:
+
+```typescript
+export type ExtractedData<M extends FieldMapping> = {
+  [K in keyof M]: M[K] extends ExtractConfig<infer R>
+    ? M[K] extends { multi: true } ? R[] : R
+    : M[K] extends RegExp ? string : never;
+};
+```
+
+#### `ParseFormat<T>`
+
+Convenience alias when you already have a known output type `T`:
+
+```typescript
+export type ParseFormat<T> = {
+  [K in keyof T]: RegExp | ExtractConfig<T[K] extends (infer U)[] ? U : T[K]>;
+};
+```
+
+#### `ParserMessageRaw<M>`
+
+Extends `ScraperMessage` with a nullable `data` field:
+
+```typescript
+export interface ParserMessageRaw<M extends FieldMapping> extends ScraperMessage {
+  data: ExtractedData<M> | null; // null when any required pattern fails
+}
+```
+
+### Methods
+
+#### `parseDay<M>(messages, format)`
+
+Processes each `ScraperMessage` against the provided `format` and returns an array of annotated messages.
+
+<ParamField path="messages" type="ScraperMessage[]" required>
+  Raw messages returned by `ScraperService.scrapeDay`.
+</ParamField>
+
+<ParamField path="format" type="M extends FieldMapping" required>
+  Declarative field extraction definition. Each key maps to a `RegExp` (simple string capture) or full `ExtractConfig<T>` (with transform, validate, multi, optional).
+</ParamField>
+
+**Returns:** `Promise<ParserMessageRaw<M>[]>` — one entry per input message; `data` is `null` if any non-optional field fails to match or validate.
+
+---
+
+## CryptoYodaScreenService
+
+`CryptoYodaScreenService` orchestrates scraping and parsing for the `crypto_yoda_channel` Telegram channel. It combines `ScraperService` and `ParserService` with a hard-coded signal format to produce typed trading signals.
+
+**Accessed via:** `core.cryptoYodaScreenService` or `inject<CryptoYodaScreenService>(TYPES.cryptoYodaScreenService)`
+
+### Signal format
+
+The `SIGNAL_FORMAT` definition extracted from the source drives the parser:
+
+```typescript
+type SignalFields = {
+  symbol: string;
+  direction: "short" | "long";
+  entry: { from: number; to: number };
+  targets: number[];
+  stoploss: number;
+};
+
+const SIGNAL_FORMAT: ParseFormat<SignalFields> = {
+  symbol: {
+    pattern: /#([A-Z0-9]+)\/USDT/,
+    group: 1,
+    validate: (v) => v.length > 0,
+  },
+  direction: {
+    pattern: /(ШОРТ|ЛОНГ)/i,
+    transform: (raw) => (raw.toUpperCase() === "ШОРТ" ? "short" : "long"),
+    validate: (v) => v === "short" || v === "long",
+  },
+  entry: {
+    pattern: /зоне\s+\$?([\d.,]+)\s*[-–—]\s*(?:\$?[\d.,]+\s*[-–—]\s*)?\$?([\d.,]+)(?=\s)/i,
+    transform: (_, m) => ({ from: num(m[1]), to: num(m[2]) }),
+    validate: (v) => isNum(v.from) && isNum(v.to) && v.from < v.to,
+  },
+  targets: {
+    pattern: /Закрыть(?:\s+ордер)?\s+по(?:\s+цене)?\s+\$?([\d.,]+)/gi,
+    transform: (_, m) => num(m[1]),
+    validate: (v) => isNum(v),
+    multi: true,  // uses matchAll — returns number[]
+  },
+  stoploss: {
+    pattern: /СТОП-?ЛОСС:\s*\$?([\d.,]+)/i,
+    transform: (_, m) => num(m[1]),
+    validate: (v) => isNum(v),
+  },
+};
+```
+
+| Field | Type | Source pattern |
+|---|---|---|
+| `symbol` | `string` | `#BTCUSDT` → `"BTC"` |
+| `direction` | `"short" \| "long"` | `ШОРТ` → `"short"`, `ЛОНГ` → `"long"` |
+| `entry` | `{ from: number; to: number }` | Price range after `"в зоне"` |
+| `targets` | `number[]` | All `"Закрыть по"` prices (multi) |
+| `stoploss` | `number` | Price after `"СТОП-ЛОСС:"` |
+
+### Methods
+
+#### `screenDay(date)`
+
+Scrapes the `crypto_yoda_channel` for the given date and immediately parses the results using `SIGNAL_FORMAT`.
+
+<ParamField path="date" type="Date" required>
+  UTC date to screen. Passed directly to `ScraperService.scrapeDay`.
+</ParamField>
+
+**Returns:** `Promise<ParserMessageRaw<typeof SIGNAL_FORMAT>[]>` — all messages with parsed signal data (or `data: null` for non-signal messages).
+
+#### `parseDay(scraperList)`
+
+Parses a pre-fetched list of messages without re-scraping. Useful when you already have messages from a previous scrape and want to re-parse with the same format.
+
+<ParamField path="scraperList" type="ScraperMessage[]" required>
+  Raw messages to parse.
+</ParamField>
+
+**Returns:** `Promise<ParserMessageRaw<typeof SIGNAL_FORMAT>[]>`
+
+### Usage example
+
+```typescript
+// In a strategy file — no imports needed
+const today = new Date();
+const results = await core.cryptoYodaScreenService.screenDay(today);
+
+const signals = results.filter((r) => r.data !== null);
+
+for (const signal of signals) {
+  const { symbol, direction, entry, targets, stoploss } = signal.data!;
+  console.log(`${symbol} ${direction} entry ${entry.from}–${entry.to}`);
+  console.log(`  targets: ${targets.join(", ")}  stoploss: ${stoploss}`);
+}
+```
+
+---
+
+## CandleDbService
+
+`CandleDbService` extends `BaseCRUD(CandleModel)` and adds candle-specific query helpers. All base CRUD methods (`update`, `findById`, `findAll`, `iterate`, `paginate`) are inherited unchanged. The `create` method is **overridden** with an atomic upsert to guarantee idempotency.
+
+**Accessed via:** `core.candleDbService` or `inject<CandleDbService>(TYPES.candleDbService)`
+
+### Data types
+
+```typescript
+// ICandleDto — the shape used when writing a candle
+interface ICandleDto {
+  symbol: string;           // e.g. "BTCUSDT"
+  interval: CandleInterval; // "1m" | "3m" | "5m" | "15m" | "30m" | "1h" | "2h" | "4h" | "6h" | "8h" | "1d"
+  timestamp: number;        // Unix epoch in milliseconds (candle open time)
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+// ICandleRow — the shape returned after a read
+interface ICandleRow extends ICandleDto {
+  id: string;               // MongoDB _id as string
+  exchangeName: string;     // Always "ccxt_binance"
+  createDate: Date;         // Mongoose timestamps.createdAt
+  updatedDate: Date;        // Mongoose timestamps.updatedAt
+}
+```
+
+The compound index `{ symbol: 1, interval: 1, timestamp: 1 }` is `unique: true`, preventing duplicate candles at the schema level.
+
+### Methods
+
+#### `create(dto)`
+
+Atomically inserts a candle or returns the existing one. Uses `findOneAndUpdate` with `$setOnInsert` so calling `create` twice with identical `(symbol, interval, timestamp)` is always safe.
+
+<ParamField path="dto" type="ICandleDto" required>
+  Candle data to insert. `exchangeName` is set internally to `"ccxt_binance"` and cannot be overridden via `dto`.
+</ParamField>
+
+**Returns:** `Promise<ICandleRow>` — the newly created or already-existing candle document.
+
+---
+
+#### `hasCandle(symbol, interval, timestamp)`
+
+Convenience method that returns `true` when a candle for the given coordinates exists in the database.
+
+<ParamField path="symbol" type="string" required>
+  Trading pair symbol, e.g. `"BTCUSDT"`.
+</ParamField>
+
+<ParamField path="interval" type="CandleInterval" required>
+  Candle interval string. One of `"1m"`, `"3m"`, `"5m"`, `"15m"`, `"30m"`, `"1h"`, `"2h"`, `"4h"`, `"6h"`, `"8h"`, `"1d"`.
+</ParamField>
+
+<ParamField path="timestamp" type="number" required>
+  Unix epoch milliseconds for the candle open time.
+</ParamField>
+
+**Returns:** `Promise<boolean>`
+
+---
+
+#### `findBySymbolIntervalTimestamp(symbol, interval, timestamp)`
+
+Looks up a single candle by its three primary coordinates plus the internal `exchangeName`.
+
+<ParamField path="symbol" type="string" required>
+  Trading pair symbol.
+</ParamField>
+
+<ParamField path="interval" type="CandleInterval" required>
+  Candle interval string.
+</ParamField>
+
+<ParamField path="timestamp" type="number" required>
+  Unix epoch milliseconds for the candle open time.
+</ParamField>
+
+**Returns:** `Promise<ICandleRow | null>` — the matching candle, or `null` if not found.
+
+### Usage example
+
+```typescript
+// In a strategy file
+const exists = await core.candleDbService.hasCandle("ETHUSDT", "1h", 1710460800000);
+
+if (!exists) {
+  await core.candleDbService.create({
+    symbol: "ETHUSDT",
+    interval: "1h",
+    timestamp: 1710460800000,
+    open: 3500,
+    high: 3550,
+    low: 3480,
+    close: 3520,
+    volume: 12345.67,
+  });
+}
+
+const candle = await core.candleDbService.findBySymbolIntervalTimestamp(
+  "ETHUSDT",
+  "1h",
+  1710460800000
+);
+```
+
+<Tip>
+Use `hasCandle` before inserting in tight ingestion loops — it adds one query but avoids the upsert overhead on the MongoDB server when the candle almost certainly already exists after the first backfill pass.
+</Tip>

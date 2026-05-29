@@ -1,0 +1,216 @@
+---
+title: "BaseMap: Namespaced Redis Key-Value Map with TTL in @pro/core"
+sidebarTitle: "Base Map"
+description: "Explore BaseMap, a di-factory Redis wrapper that provides namespaced key-value storage, optional TTL expiry, streaming iteration, and async SCAN-based bulk operations."
+---
+
+`BaseMap` is a `di-factory` factory function that wraps an `ioredis` client to produce a strongly-typed, namespace-isolated key-value map. Every key is automatically prefixed with `connectionKey:` so that multiple `BaseMap` instances sharing the same Redis database never collide. An optional TTL gives entries automatic expiry — pass `-1` to keep entries indefinitely. `LoggerService` is injected automatically for structured logging of every operation.
+
+## Constructor parameters
+
+<ParamField path="connectionKey" type="string" required>
+  Namespace prefix applied to every Redis key as `${connectionKey}:${key}`. Choose a prefix that is unique to the map's purpose, e.g. `"signals:crypto_yoda"`.
+</ParamField>
+
+<ParamField path="ttlExpireSeconds" type="number">
+  Time-to-live in seconds applied to each key after a `set` call. Defaults to `300` (5 minutes). Pass `-1` to disable automatic expiry entirely.
+</ParamField>
+
+## Constants
+
+| Constant | Value | Description |
+|---|---|---|
+| `ITERATOR_BATCH_SIZE` | `100` | Number of keys fetched per `SCAN` cursor page |
+| `DEFAULT_TTL_EXPIRE_SECONDS` | `300` | Default TTL (5 minutes) used when no `ttlExpireSeconds` is provided |
+
+## Key format
+
+Internally, `_getItemKey(key)` produces the full Redis key:
+
+```typescript
+_getItemKey(key: string): string {
+  return `${this.connectionKey}:${key}`;
+}
+```
+
+Public methods accept and return **bare** keys (without the prefix). Prefix stripping is handled automatically in `toArray`, `iterate`, `keys`, and `values` using:
+
+```typescript
+const key = fullKey.substring(this.connectionKey.length + 1);
+```
+
+## Public methods
+
+### `set(key, value)`
+
+Stores a value in Redis and conditionally sets its TTL.
+
+<ParamField path="key" type="string" required>
+  Bare key (without namespace prefix). Must be non-empty — throws `Error("Key cannot be empty")` otherwise.
+</ParamField>
+
+<ParamField path="value" type="unknown" required>
+  Value to store. Passed directly to `redis.set`; ioredis serialises it to a string.
+</ParamField>
+
+**Returns:** `Promise<void>`
+
+When `ttlExpireSeconds !== -1`, a `redis.expire` call is issued immediately after `redis.set`.
+
+---
+
+### `get(key)`
+
+Retrieves a single value by key.
+
+<ParamField path="key" type="string | null" required>
+  Bare key to look up. Passing `null` returns `null` immediately without a Redis round-trip.
+</ParamField>
+
+**Returns:** `Promise<unknown | null>` — the stored value, or `null` if the key does not exist or `key` is `null`.
+
+---
+
+### `delete(key)`
+
+Removes a key from Redis.
+
+<ParamField path="key" type="string" required>
+  Bare key to delete.
+</ParamField>
+
+**Returns:** `Promise<void>`
+
+---
+
+### `has(key)`
+
+Checks whether a key exists in Redis.
+
+<ParamField path="key" type="string" required>
+  Bare key to test.
+</ParamField>
+
+**Returns:** `Promise<boolean>` — `true` when `redis.exists` returns `1`, `false` otherwise.
+
+---
+
+### `clear()`
+
+Deletes **all** keys belonging to this map using a `SCAN` loop with the pattern `${connectionKey}:*`. Keys are deleted in batches of `ITERATOR_BATCH_SIZE` to avoid blocking the Redis event loop.
+
+**Returns:** `Promise<void>`
+
+```typescript
+// Remove all cached signals from a previous run
+await signalMap.clear();
+```
+
+---
+
+### `toArray()`
+
+Collects all entries into an in-memory array. Iterates the full keyspace with `SCAN` + `MGET`; strips the namespace prefix from keys before returning.
+
+**Returns:** `Promise<[string, unknown][]>` — array of `[bareKey, value]` tuples.
+
+<Note>
+For very large maps, `iterate()` is preferable because it yields entries one batch at a time instead of accumulating everything in memory.
+</Note>
+
+---
+
+### `iterate()`
+
+Async generator that yields `[bareKey, value]` tuples in `SCAN` cursor order, fetching `ITERATOR_BATCH_SIZE` entries per batch.
+
+**Returns:** `AsyncIterableIterator<readonly [string, unknown]>`
+
+```typescript
+for await (const [key, value] of signalMap.iterate()) {
+  console.log(key, value);
+}
+```
+
+---
+
+### `keys()`
+
+Async generator that yields only the bare key strings, one per Redis key found by `SCAN`.
+
+**Returns:** `AsyncIterableIterator<string>`
+
+```typescript
+for await (const key of signalMap.keys()) {
+  console.log(key);
+}
+```
+
+---
+
+### `values()`
+
+Async generator that yields only the stored values, using `SCAN` + `MGET` per batch.
+
+**Returns:** `AsyncIterableIterator<unknown>`
+
+---
+
+### `size()`
+
+Counts all keys belonging to this map by iterating the full `SCAN` cursor without fetching values.
+
+**Returns:** `Promise<number>` — total number of entries currently in the map.
+
+---
+
+## Export type
+
+```typescript
+export type TBaseMap = InstanceType<ReturnType<typeof BaseMap>>;
+```
+
+`TBaseMap` gives you the concrete instance type of any `BaseMap`-derived class without needing to reference the factory directly. Use it for parameter and return-type annotations.
+
+## Extending BaseMap — example
+
+Create a subclass by calling `BaseMap(connectionKey, ttl)`. The subclass inherits all map operations and can add domain-specific convenience methods.
+
+```typescript
+import BaseMap, { TBaseMap } from "@pro/core/lib/common/BaseMap";
+
+// Cache parsed signals for 10 minutes, keyed by date string
+export class SignalCacheMap extends BaseMap("signals:crypto_yoda", 600) {
+  // Store a structured signal — caller must JSON.stringify if needed
+  public setSignal = async (date: string, payload: string): Promise<void> => {
+    await this.set(date, payload);
+  };
+
+  public getSignal = async (date: string): Promise<string | null> => {
+    return (await this.get(date)) as string | null;
+  };
+}
+
+export type TSignalCacheMap = TBaseMap;
+export default SignalCacheMap;
+```
+
+<Tip>
+Pass `ttlExpireSeconds = -1` when entries should **never expire** — for example when caching immutable historical data such as parsed candle records where re-fetching on expiry would be expensive. Omit the argument (or pass `300`) for ephemeral caches like real-time signal buffers.
+</Tip>
+
+## SCAN-based bulk operations
+
+`clear`, `toArray`, `iterate`, `keys`, `values`, and `size` all use the Redis `SCAN` command with `COUNT ITERATOR_BATCH_SIZE` (100) rather than `KEYS`, which means they are safe to run against production Redis instances without risking a blocking scan of the entire keyspace. Each iteration step fetches at most 100 keys before yielding control back to the event loop.
+
+```typescript
+// Underlying SCAN loop pattern used by all bulk methods
+while (true) {
+  const [nextCursor, keys] = await redis.scan(
+    cursor, "MATCH", `${this.connectionKey}:*`, "COUNT", ITERATOR_BATCH_SIZE
+  );
+  cursor = nextCursor;
+  // process keys...
+  if (cursor === "0" || cursor === 0) break;
+}
+```

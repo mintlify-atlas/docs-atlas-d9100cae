@@ -1,0 +1,117 @@
+---
+title: "backtest-monorepo-parallel: Fast Parallel Backtesting in TypeScript"
+sidebarTitle: "Introduction"
+description: "A TypeScript monorepo template that runs 9 symbols concurrently in a single Node process, hitting ~6 300× real-time speed with Redis caching and atomic Mongo upserts."
+---
+
+`backtest-monorepo-parallel` is a TypeScript monorepo template built on top of [backtest-kit](https://github.com/tripolskypetr/backtest-kit) that runs multiple trading symbols in parallel within a single Node.js process. It ships a zero-config dependency-injection runtime that exposes a typed `globalThis.core` object to strategy files under `./content/` — no imports, no bundler hooks, and no changes to the strategy author's code required.
+
+## Headline performance
+
+On commodity developer hardware (HP Victus 15-FA1022CI, i5-13420H, 16 GB DDR4-3200), the template recorded **297 backtest events across 9 symbols in 2.893 seconds** of wall time. That corresponds to 34 minutes of historical market data per symbol, replayed in parallel.
+
+| Metric | Value |
+|---|---|
+| Wall-clock span | **2 893 ms** (~2.9 s) |
+| Total events | **297** |
+| Symbols in parallel | **9** (BTC, POL, ZEC, HYPE, XAUT, DOGE, SOL, PENGU, HBAR) |
+| Historical time per symbol | **34 minutes** (2 040 000 ms) |
+| Per-symbol replay speed | **≈ 703×** real-time |
+| **Aggregate replay speed** | **≈ 6 326×** real-time |
+| Event throughput | **≈ 103 events/sec** (one Node process) |
+
+## Why it's fast
+
+Four design decisions combine to remove every major bottleneck in the hot path:
+
+<CardGroup cols={2}>
+  <Card title="Single-process concurrency" icon="bolt">
+    All 9 `Backtest.background(...)` calls share one Node event loop, one Mongo connection pool, and one Redis pool. No IPC, no subprocess fork overhead.
+  </Card>
+  <Card title="Redis O(1) lookup cache" icon="database">
+    Every `findByContext(...)` is a hot-path Redis `GET` before falling back to Mongo. Strings only — no JSON parse on the cache key.
+  </Card>
+  <Card title="Atomic upserts" icon="lock">
+    Every write is a single `findOneAndUpdate({ $set }, { upsert: true, new: true })` — no read-modify-write, no application-side locks, no retry loops under concurrent symbol writes.
+  </Card>
+  <Card title="JIT-friendly hot path" icon="gauge-high">
+    The per-tick strategy body is ~30 lines of synchronous arithmetic plus a few awaited helpers. V8 inlines aggressively, keeping per-tick overhead minimal.
+  </Card>
+</CardGroup>
+
+## Workspace packages
+
+The monorepo (`npm workspaces`) contains two packages:
+
+<Accordion title="@pro/core — DI container, services, and schemas">
+  `@pro/core` is the shared infrastructure layer. It exports an `ioc` object assembled from injected service instances and immediately assigns it to `globalThis.core`:
+
+  ```typescript
+  // packages/core/src/lib/index.ts (excerpt)
+  export const ioc = {
+    ...baseServices,
+    ...coreServices,
+    ...dbServices,
+    ...screenServices,
+  };
+
+  init();
+
+  declare global {
+    var core: typeof ioc;
+  }
+
+  Object.assign(globalThis, { core: ioc });
+  ```
+
+  Services currently registered include `loggerService`, `scraperService`, `parserService`, `candleDbService`, and `cryptoYodaScreenService`. Every service is wired through a symbol-keyed `TYPES` registry and a `provide()` call, so adding a new service never touches files under `./content/`.
+</Accordion>
+
+<Accordion title="@pro/main — entry points and CLI mode dispatcher">
+  `@pro/main` reads the CLI flags passed to `npm run start` via `getArgs()` and conditionally imports one of four mode files: `backtest.ts`, `live.ts`, `paper.ts`, or `session.ts`. In Mode A (the `--entry` flag), `backtest.ts` reads `CC_SYMBOL_LIST` and calls `Backtest.background(symbol, …)` for each symbol concurrently. Without `--entry`, the bundled `@backtest-kit/cli` runner takes over for single-symbol Mode B runs.
+</Accordion>
+
+## Zero-import DI runtime
+
+Strategy files placed under `./content/` can call `core.candleDbService.findById(...)` — or any other service — without a single import statement. This works because the root `tsconfig.json` maps the `@pro/core` module specifier to the rolled-up `packages/core/types.d.ts` declaration file:
+
+```json
+// tsconfig.json (paths section)
+{
+  "paths": {
+    "@pro/core": ["./packages/core/types.d.ts"],
+    "@pro/main": ["./packages/main/types.d.ts"]
+  }
+}
+```
+
+TypeScript resolves `core.*` through the global augmentation (`declare global { var core: typeof ioc }`) baked into `types.d.ts` at build time. At runtime, `config/loader.config.ts` imports `@pro/core` (mapped to the CJS build via `alias.config.ts`), which runs the `Object.assign(globalThis, { core: ioc })` side-effect before any strategy file is evaluated.
+
+## Key dependencies
+
+| Package | Version | Role |
+|---|---|---|
+| `backtest-kit` | 9.8.4 | Core engine; `@backtest-kit/cli` is the runner |
+| `@backtest-kit/mongo` | 0.6.0 | Mongo persist adapters + `waitForInit()` |
+| `@backtest-kit/ui` | 9.8.4 | Optional web UI on port 60050 |
+| `di-kit` | latest | Symbol-keyed IoC container (`createActivator`) |
+| `di-factory` | 1.0.9 | Class-factory helper for `BaseCRUD` / `BaseMap` |
+| `mongoose` | 8.23.0 | Mongo client and schema definitions |
+| `ioredis` | 5.6.1 | Redis client (used via `getRedis()`) |
+| `ccxt` | latest | Exchange client for candle fetching |
+| `functools-kit` | 2.3.0 | Utility belt: `singleshot`, `errorData`, and more |
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Clone the repo, start infrastructure, build packages, and run your first parallel backtest in minutes.
+  </Card>
+  <Card title="Architecture" icon="sitemap" href="/architecture">
+    Understand the monorepo layout, DI wiring, build pipeline, and config layer in depth.
+  </Card>
+  <Card title="Mode A Parallel Guide" icon="code-branch" href="/guides/mode-a-parallel">
+    Deep-dive into the parallel entry point, symbol list configuration, and caching strategy.
+  </Card>
+  <Card title="IoC Container API" icon="cube" href="/api/ioc-container">
+    Full reference for `provide()`, `inject<T>()`, `init()`, and the TYPES symbol registry.
+  </Card>
+</CardGroup>
